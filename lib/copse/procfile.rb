@@ -14,7 +14,18 @@ module Copse
     # Control operators that make Ruby's Process.spawn hand the string to
     # /bin/sh, which then becomes the pid foreman records.
     FIXABLE_SEPARATORS = [";", "&&", "||"].freeze
+
+    # Shapes no `exec` placement can make signal-transparent.
+    #
+    # A pipeline or a background `&` keeps a shell waiting on the whole thing. A
+    # command substitution or subshell is worse: splicing `exec` before the last
+    # operator would put it *inside* the parentheses, so the outer command is never
+    # exec'd at all -- and `exec (cd x && y)` is not even valid shell syntax, so
+    # there is no prefix form to fall back to. Refusing to rewrite what cannot be
+    # reasoned about beats producing something subtly wrong.
     UNFIXABLE_SEPARATORS = ["|", "&"].freeze
+    UNFIXABLE_GROUPINGS = ["$(", "`", "("].freeze
+    UNFIXABLE = (UNFIXABLE_SEPARATORS + UNFIXABLE_GROUPINGS).freeze
 
     # The characters Ruby itself treats as requiring a shell (mirrors
     # rb_exec_fillarg). A command containing any of these is spawned via
@@ -97,7 +108,7 @@ module Copse
       command = command.sub(/[\s;]+\z/, "")
       operators = top_level_operators(command)
 
-      if operators.any? { |op| UNFIXABLE_SEPARATORS.include?(op[:token]) }
+      if operators.any? { |op| UNFIXABLE.include?(op[:token]) }
         return [command, unfixable_warning(command, operators)]
       end
 
@@ -158,6 +169,14 @@ module Copse
           when "'" then in_single = true
           when '"' then in_double = true
           when "\\" then index += 1
+          when "`" then operators << { token: "`", at: index }
+          when "$"
+            if command[index + 1] == "("
+              operators << { token: "$(", at: index }
+              index += 1
+            end
+          when "("
+            operators << { token: "(", at: index }
           when ";", "\n" then operators << { token: ";", at: index }
           when "&"
             if command[index + 1] == "&"
@@ -199,7 +218,16 @@ module Copse
     end
 
     def self.unfixable_warning(_command, operators)
-      kind = operators.any? { |op| op[:token] == "|" } ? "a pipeline" : "a background &"
+      tokens = operators.map { |op| op[:token] }
+      # Groupings are named before separators: a pipe inside `$( )` is incidental,
+      # and the substitution is the reason the line cannot be rewritten.
+      kind =
+        if tokens.include?("$(") || tokens.include?("`") then "a command substitution"
+        elsif tokens.include?("(") then "a subshell"
+        elsif tokens.include?("|") then "a pipeline"
+        else "a background &"
+        end
+
       "uses #{kind}, which keeps a shell in front of it -- its child processes may " \
         "survive teardown. Consider splitting it into separate Procfile entries."
     end

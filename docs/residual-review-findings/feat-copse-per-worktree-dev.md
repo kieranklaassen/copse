@@ -12,10 +12,42 @@ unreachable. Both fallback tiers are unavailable, which makes this committed fil
 the durable record rather than a convenience copy. File these as issues once the
 repo has a remote.
 
-## Decisions the review deliberately left open
+## Decisions the review left open -- both now RESOLVED
 
-Both are real design calls with two defensible answers. Neither is a defect to
-patch; picking one is the work.
+Recorded here as the decision log. Both were resolved and implemented rather than
+left hanging; the reasoning is kept because in each case the option that looked
+better on paper turned out not to exist.
+
+### #10 -- RESOLVED: offset the base copse hands foreman
+
+Chosen: pass foreman `PORT = derived + 100` (`Session::FOREMAN_PORT_OFFSET`).
+
+Rejected: removing `PORT` from `foreman_env` entirely, which read as the cleaner
+option. Foreman then falls back to `base_port = 5000` -- which is the macOS AirPlay
+Receiver port *and* is on copse's own reserved list, so the first secondary would
+have landed somewhere actively hostile. Offsetting keeps the values near the
+derived neighbourhood and guarantees no child is handed the web port.
+
+The regression test now asserts the **first** secondary's port, which is the one
+that was broken; the original test only checked the second, which is exactly why
+this was missed.
+
+### #12 -- RESOLVED: refuse to rewrite substitutions and subshells
+
+Chosen: treat `$(`, backticks, and `(` as unfixable, warn, and leave the line
+byte-for-byte alone -- the same handling pipelines and background `&` already get.
+
+Rejected: exec-prefix-only for those shapes. That option does not exist:
+`exec (cd x && y)` is a shell syntax error, so there is no prefix form to fall back
+to, and splicing before the last operator puts `exec` *inside* the parentheses,
+leaving the outer command un-exec'd. Depth tracking was also rejected as more
+machinery for a shape that is vanishingly rare in a Procfile. Refusing to rewrite
+what cannot be reasoned about is correct by construction.
+
+A pipe inside a substitution now reports the substitution as the reason rather than
+the pipe, since the substitution is the root cause.
+
+## Historical record of the two decisions as originally posed
 
 ### #10 -- Foreman's base `PORT` equals the web port (P2, `lib/copse/session.rb:194`)
 

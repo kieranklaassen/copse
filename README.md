@@ -77,7 +77,7 @@ Changing the range or the reserved list would move nearly every derived port, so
 | `PORT` | the derived port — **`web` process only** |
 | `VITE_RUBY_PORT` | the derived companion port |
 
-**In a non-`web` process, read `COPSE_PORT`, not `PORT`.** Foreman assigns its children `base_port + index * 100`, so a secondary's `PORT` is a number Copse never derived.
+**In a non-`web` process, read `COPSE_PORT`, not `PORT`.** Foreman assigns its children `base_port + index * 100`, so a secondary's `PORT` is a number Copse never derived. Copse deliberately hands foreman an offset base, so no secondary is ever given the `web` process's own port.
 
 In development Copse also sets `default_url_options` for routes and Action Mailer. It stays out of the way otherwise: not in other environments, not under a plain `bin/rails server`, and not when your app set its own `host`. Puma still prints `Listening on http://127.0.0.1:5368` — that's the address it bound; Copse's line is the name to visit.
 
@@ -133,7 +133,7 @@ Rails 8's development host allowlist already includes `.localhost`, so no `confi
 ## Notes
 
 - `Ctrl-C` can take up to foreman's shutdown timeout (5s default) if a watcher doesn't exit promptly.
-- A Procfile line that is a **pipeline** (`a | b`) or backgrounds with `&` keeps a shell in front of its processes, which no `exec` placement can collapse into one signalable pid. Copse warns and leaves those lines alone; their children may survive teardown. Split them into separate entries to fix it.
+- Some Procfile lines cannot be made signal-transparent, so Copse warns and leaves them exactly as written rather than rewriting them into something subtly different. Their children may survive teardown; split them into separate entries to fix it. The shapes are a **pipeline** (`a | b`), a **background `&`**, a **command substitution** (`$(...)` or backticks), and a **subshell** (`(...)`). Each keeps a shell in front of the real process, and no `exec` placement collapses that into one signalable pid — `exec (cd x && y)` is not even valid shell syntax.
 - Out of scope: reverse proxy, daemon, TLS, port registry, and `/etc/hosts` management.
 
 ## License

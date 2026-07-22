@@ -515,10 +515,20 @@ class SessionLifecycleTest < Minitest::Test
 
     assert_equal derived.to_s, env["COPSE_PORT"],
                  "COPSE_PORT must survive foreman untouched"
-    assert_equal (derived + 100).to_s, env["PORT"],
-                 "expected foreman's per-child PORT arithmetic (base + index * 100)"
     refute_equal env["COPSE_PORT"], env["PORT"],
                  "if these matched, COPSE_PORT would be redundant"
+
+    # The case that actually bites, and the one this test used to miss by only
+    # checking the second secondary: foreman's base_port comes from PORT, so
+    # handing it the derived port gave the FIRST secondary the web process's own
+    # port. Copse now offsets the base it passes foreman.
+    first = File.read(first).lines.to_h { |l| l.chomp.split("=", 2) }
+
+    refute_equal derived.to_s, first["PORT"],
+                 "the first secondary was handed the web process's port"
+    assert_equal derived.to_s, first["COPSE_PORT"]
+    assert_equal((derived + Copse::Session::FOREMAN_PORT_OFFSET).to_s, first["PORT"],
+                 "expected foreman's base to be the offset copse passes it")
   end
 
   # --- Temp directory cleanup ---------------------------------------------

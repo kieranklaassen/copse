@@ -266,6 +266,22 @@ module Copse
       copse_env
     end
 
+    # Foreman derives each child's port as `base_port + index * 100`, and takes
+    # base_port from PORT. Handing it the derived port therefore gave the *first*
+    # secondary exactly the web process's port -- so a secondary that binds it
+    # collides with puma, and copse's own collision message then blames another
+    # worktree.
+    #
+    # Offsetting the base is the least-bad of three options. Removing PORT entirely
+    # looks cleaner but is worse: foreman then falls back to 5000, which is the
+    # macOS AirPlay Receiver port and is on our own reserved list. Secondaries that
+    # need the app's real port read COPSE_PORT, which foreman does not touch.
+    FOREMAN_PORT_OFFSET = 100
+
+    def foreman_port_env
+      { "PORT" => (worktree.port + FOREMAN_PORT_OFFSET).to_s }
+    end
+
     # The environment foreman is actually spawned with -- whichever candidate the
     # probe found works. Falls back to the preferred candidate when nothing has
     # been probed yet.
@@ -287,10 +303,11 @@ module Copse
     # the second candidate rather than an alternative design: probing both is what
     # makes foreman-as-a-system-gem and foreman-in-the-Gemfile both work.
     def foreman_env_candidates
+      base = copse_env.merge(foreman_port_env)
       overrides = bundler_overrides
-      return [copse_env] if overrides.empty?
+      return [base] if overrides.empty?
 
-      [copse_env.merge(overrides), copse_env]
+      [base.merge(overrides), base]
     end
 
     # Process.spawn *merges* its env hash rather than replacing the environment,

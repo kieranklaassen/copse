@@ -207,6 +207,34 @@ class ProcfileTest < Minitest::Test
     end
   end
 
+  def test_a_command_substitution_or_subshell_is_refused_not_mis_spliced
+    # Splicing before the last operator would put `exec` *inside* the parentheses,
+    # leaving the outer command un-exec'd -- and `exec (cd x && y)` is not valid
+    # shell syntax, so there is no prefix form to fall back to either. Refusing is
+    # the only correct-by-construction option.
+    {
+      "bin/x $(a && b)" => "command substitution",
+      "bin/x `date`" => "command substitution",
+      "(cd frontend && yarn build --watch)" => "subshell",
+      "bin/x $(ls *.css | head -1)" => "command substitution"
+    }.each do |input, expected_kind|
+      command, warning = Copse::Procfile.signal_transparent(input)
+
+      assert_equal input, command, "#{input.inspect} was rewritten despite being unfixable"
+      refute_nil warning, "#{input.inspect} was rewritten silently"
+      assert_includes warning, expected_kind
+    end
+  end
+
+  def test_parentheses_inside_quotes_are_not_a_subshell
+    ["bin/rails runner 'puts (1 + 2)'", %(bin/run --filter "a(b)c")].each do |input|
+      command, warning = Copse::Procfile.signal_transparent(input)
+
+      assert_nil warning, "#{input.inspect} was misread as a subshell"
+      assert_equal "exec #{input}", command
+    end
+  end
+
   def test_a_pipeline_is_warned_about_and_left_unmodified
     # No exec placement collapses a pipeline into one pid: the recorded process is
     # the shell awaiting the whole pipeline.
