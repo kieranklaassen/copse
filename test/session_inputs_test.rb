@@ -56,12 +56,12 @@ class SessionInputsTest < Minitest::Test
                  "the web process lost its bundle, which would break `require`"
   end
 
-  def test_the_foreman_environment_drops_the_bundler_environment
+  def test_the_preferred_foreman_environment_drops_the_bundler_environment
     # Proven by observing a real child process, not by inspecting the hash:
     # Process.spawn merges rather than replaces, so handing it
     # Bundler.original_env would leave the inherited BUNDLE_* keys in place.
     out, _err, status = Open3.capture3(
-      session.foreman_env, "ruby", "-e", "puts ENV.fetch('BUNDLE_GEMFILE', 'ABSENT')"
+      session.foreman_env_candidates.first, "ruby", "-e", "puts ENV.fetch('BUNDLE_GEMFILE', 'ABSENT')"
     )
 
     assert_predicate status, :success?
@@ -69,12 +69,12 @@ class SessionInputsTest < Minitest::Test
                  "foreman would inherit the bundle and fail with 'not currently included in the bundle'"
   end
 
-  def test_the_foreman_environment_still_carries_the_copse_variables
-    out, _err, = Open3.capture3(
-      session.foreman_env, "ruby", "-e", "puts ENV.fetch('COPSE_PORT', 'ABSENT')"
-    )
+  def test_every_foreman_environment_carries_the_copse_variables
+    session.foreman_env_candidates.each do |candidate|
+      out, _err, = Open3.capture3(candidate, "ruby", "-e", "puts ENV.fetch('COPSE_PORT', 'ABSENT')")
 
-    assert_equal "5368", out.strip
+      assert_equal "5368", out.strip
+    end
   end
 
   # --- Foreground command (Q4) ----------------------------------------------
@@ -170,26 +170,71 @@ class SessionInputsTest < Minitest::Test
     refute_predicate session, :foreman_outdated?
   end
 
-  def test_the_foreman_environment_restores_the_pre_bundler_path
+  def test_the_preferred_foreman_environment_restores_the_pre_bundler_path
     # Bundler prepends its own bin directory to PATH. Restoring the original is
     # deliberate: foreman must resolve the way it would outside the bundle, which
     # is exactly what Rails' own /bin/sh `bin/dev` achieves. It also means
     # ENV["PATH"] is not the seam the probe reads -- see PinnedPathSession below.
     skip "not running under bundler" unless defined?(Bundler) && Bundler.respond_to?(:original_env)
 
-    assert_equal Bundler.original_env["PATH"], session.foreman_env["PATH"]
+    assert_equal Bundler.original_env["PATH"], session.foreman_env_candidates.first["PATH"]
   end
 
-  # Pins PATH for the probe. Necessary because foreman_env deliberately restores
-  # the pre-bundler PATH, so setting ENV["PATH"] cannot reach it.
+  def test_the_inherited_environment_is_the_second_candidate
+    # Stripping the bundle is right for foreman-as-a-system-gem, but it is exactly
+    # wrong when foreman is provided *only* by the app's Gemfile. Probing both is
+    # what makes those two setups both work.
+    skip "not running under bundler" unless defined?(Bundler) && Bundler.respond_to?(:original_env)
+
+    candidates = session.foreman_env_candidates
+
+    assert_equal 2, candidates.size
+    refute candidates.first.key?("BUNDLE_GEMFILE") && candidates.first["BUNDLE_GEMFILE"],
+           "the preferred candidate still carries the bundle"
+    assert_nil candidates.last["BUNDLE_GEMFILE"],
+               "the inherited candidate should not override BUNDLE_GEMFILE at all"
+  end
+
+  def test_falls_back_to_the_inherited_environment_when_the_stripped_one_cannot_find_foreman
+    # Simulates foreman being available only inside the bundle: the first
+    # candidate's PATH cannot see it, the second one's can.
+    stub_dir = File.join(@root, "bundled")
+    FileUtils.mkdir_p(stub_dir)
+    stub = File.join(stub_dir, "foreman")
+    File.write(stub, "#!/bin/sh\necho 0.90.0\n")
+    File.chmod(0o755, stub)
+
+    s = TwoPathSession.new(@worktree, root: @root, out: StringIO.new,
+                           first: "", second: stub_dir)
+
+    assert_predicate s, :foreman_available?
+    assert_equal "0.90.0", s.foreman_version
+    assert_equal stub_dir, s.foreman_env["PATH"],
+                 "the spawn must use the environment the probe actually succeeded with"
+  end
+
+  class TwoPathSession < Copse::Session
+    def initialize(*args, first:, second:, **kwargs)
+      super(*args, **kwargs)
+      @paths = [first, second]
+    end
+
+    def foreman_env_candidates
+      @paths.map { |path| copse_env.merge("PATH" => path) }
+    end
+  end
+
+  # Pins PATH for the probe. Necessary because the candidate environments
+  # deliberately restore the pre-bundler PATH, so setting ENV["PATH"] cannot
+  # reach them.
   class PinnedPathSession < Copse::Session
     def initialize(*args, path:, **kwargs)
       super(*args, **kwargs)
       @path = path
     end
 
-    def foreman_env
-      super.merge("PATH" => @path)
+    def foreman_env_candidates
+      super.map { |candidate| candidate.merge("PATH" => @path) }
     end
   end
 

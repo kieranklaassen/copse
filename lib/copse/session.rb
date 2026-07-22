@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "open3"
+require "socket"
 require "tmpdir"
 require "fileutils"
 
@@ -183,6 +184,13 @@ module Copse
   class Session
     MIN_FOREMAN_VERSION = "0.90.0"
 
+    # How long to wait before checking whether foreman died on the spot. Long
+    # enough to catch a missing binary or an empty Procfile, short enough to be
+    # invisible next to a Rails boot.
+    FOREMAN_STARTUP_GRACE = 0.3
+
+    INTERRUPTED_STATUS = 130
+
     attr_reader :worktree, :root
 
     def initialize(worktree, root: nil, out: $stdout)
@@ -190,6 +198,158 @@ module Copse
       @root = File.expand_path(root || worktree.root)
       @out = out
     end
+
+    # Boots the app and returns the foreground process's exit status.
+    #
+    # The load-bearing property is that the web process is spawned with this
+    # process's own stdin, stdout, and stderr and stays in the terminal's
+    # foreground process group, so `binding.irb` and `debug` behave exactly as
+    # they do under a bare `rails server`. Nothing may come between the two.
+    def start
+      @out.puts "=> Copse: #{worktree.url}"
+
+      # No secondaries means no foreman -- not even a preflight. The Procfile the
+      # install generator writes has only a `web` line, so preflighting a tool
+      # this run will never use would refuse to boot the most common app. Running
+      # `foreman start` against an empty Procfile is fatal anyway.
+      return with_term_trap { run_foreground } unless secondaries?
+
+      unless foreman_available?
+        @out.puts foreman_error_message
+        return 1
+      end
+      @out.puts foreman_version_warning if foreman_outdated?
+
+      dir, path = write_temp_procfile
+      @foreman_pid = spawn_foreman(path)
+
+      with_term_trap do
+        report_if_foreman_died_early
+        run_foreground
+      end
+    ensure
+      teardown(dir)
+    end
+
+    private
+
+    def run_foreground
+      @web_pid = Process.spawn(web_env, web_command, chdir: root)
+      _, status = Process.waitpid2(@web_pid)
+      @web_pid = nil
+
+      code = status.exitstatus || INTERRUPTED_STATUS
+      report_port_collision if code != 0 && port_in_use?
+      code
+    rescue Interrupt
+      # Ctrl-C. The TTY already delivered SIGINT to the whole foreground group, so
+      # there is nothing to announce -- just let `ensure` clean up.
+      INTERRUPTED_STATUS
+    end
+
+    def spawn_foreman(path)
+      Process.spawn(
+        foreman_env,
+        "foreman", "start",
+        "-f", path,
+        # Not optional. Foreman takes each child's working directory from the
+        # Procfile's own directory, so without this every app-relative command
+        # (`bin/rails tailwindcss:watch`, `yarn build --watch`) would run from the
+        # temp directory and die with "unknown command". Copse's own cwd does not
+        # help; only this does.
+        "-d", root,
+        # jsbundling-rails and cssbundling-rails both pass this. Without it
+        # foreman loads the app's .env, which can clobber the derived PORT.
+        "--env", "/dev/null",
+        chdir: root
+      )
+    end
+
+    # A developer should not spend an hour editing CSS with no watcher running.
+    # Nothing monitors foreman while the web process holds the foreground, so
+    # check once here.
+    def report_if_foreman_died_early
+      sleep FOREMAN_STARTUP_GRACE
+      pid, status = Process.waitpid2(@foreman_pid, Process::WNOHANG)
+      return if pid.nil?
+
+      @foreman_reaped = true
+      @out.puts "copse: foreman exited immediately (status #{status.exitstatus}). " \
+                "The #{secondaries.size == 1 ? 'process' : 'processes'} " \
+                "#{secondaries.map(&:name).join(', ')} are not running."
+    rescue Errno::ECHILD
+      @foreman_reaped = true
+    end
+
+    def teardown(dir)
+      terminate_web
+      terminate_foreman
+      FileUtils.remove_entry(dir) if dir && File.exist?(dir)
+    end
+
+    def terminate_web
+      return if @web_pid.nil?
+
+      Process.kill("TERM", @web_pid)
+      Process.waitpid(@web_pid)
+    rescue Errno::ESRCH, Errno::ECHILD
+      # Already gone.
+    ensure
+      @web_pid = nil
+    end
+
+    # Signals foreman's own pid and lets foreman reap its children.
+    #
+    # Never a negative pgid. Foreman does not call setsid, so its process group is
+    # the caller's own -- `Process.kill("-TERM", pgid)` would signal the
+    # developer's shell session.
+    def terminate_foreman
+      return if @foreman_pid.nil? || @foreman_reaped
+
+      begin
+        Process.kill("TERM", @foreman_pid)
+      rescue Errno::ESRCH
+        # Expected on Ctrl-C: the TTY signalled foreman directly, because its
+        # children share this terminal's foreground process group.
+      end
+
+      begin
+        Process.waitpid(@foreman_pid)
+      rescue Errno::ECHILD
+        # Already reaped.
+      end
+    ensure
+      @foreman_pid = nil
+    end
+
+    # Without a trap, SIGTERM kills this process outright and `ensure` never runs,
+    # which would leave foreman and its children behind.
+    def with_term_trap
+      previous = Signal.trap("TERM") { raise Interrupt }
+      yield
+    ensure
+      Signal.trap("TERM", previous || "DEFAULT")
+    end
+
+    # Derived ports are uncoordinated by design, so collisions happen. Puma's
+    # "Address already in use" does not reach us -- the web process owns the
+    # terminal and we see only an exit status -- so check whether the port is
+    # actually held before blaming a collision. A non-zero exit has many causes.
+    def port_in_use?
+      TCPServer.new("127.0.0.1", worktree.port).close
+      false
+    rescue Errno::EADDRINUSE
+      true
+    rescue SystemCallError
+      false
+    end
+
+    def report_port_collision
+      @out.puts "copse: port #{worktree.port} (derived from #{worktree.host}) is already in use. " \
+                "Another app or worktree most likely derived the same port."
+    end
+
+    public
 
     def procfile
       return @procfile if defined?(@procfile)
@@ -218,12 +378,31 @@ module Copse
       copse_env
     end
 
-    # Foreman must not inherit the bundler environment. `bin/dev` has to load the
-    # bundle to require copse at all, so foreman would otherwise inherit
-    # BUNDLE_GEMFILE and RUBYOPT and die with "foreman is not currently included
-    # in the bundle" -- even when foreman is installed.
+    # The environment foreman is actually spawned with -- whichever candidate the
+    # probe found works. Falls back to the preferred candidate when nothing has
+    # been probed yet.
     def foreman_env
-      copse_env.merge(bundler_overrides)
+      foreman_version
+      @foreman_env || foreman_env_candidates.first
+    end
+
+    # Two ways foreman can be reachable, and neither one covers both.
+    #
+    # Stripping the bundler environment first is what handles the common case:
+    # `bin/dev` has to load the bundle to require copse at all, so foreman would
+    # otherwise inherit BUNDLE_GEMFILE and RUBYOPT and die with "foreman is not
+    # currently included in the bundle" even though it is installed. That is what
+    # Rails' own /bin/sh `bin/dev` achieves by exec'ing foreman outside the bundle.
+    #
+    # But if foreman is provided *only* by the app's Gemfile, the stripped
+    # environment is the one that cannot see it. So the inherited environment is
+    # the second candidate rather than an alternative design: probing both is what
+    # makes foreman-as-a-system-gem and foreman-in-the-Gemfile both work.
+    def foreman_env_candidates
+      overrides = bundler_overrides
+      return [copse_env] if overrides.empty?
+
+      [copse_env.merge(overrides), copse_env]
     end
 
     # Process.spawn *merges* its env hash rather than replacing the environment,
@@ -303,12 +482,26 @@ module Copse
     def foreman_version
       return @foreman_probe[:version] if defined?(@foreman_probe)
 
-      out, _err, status = Open3.capture3(foreman_env, "foreman", "version")
-      @foreman_probe = { ok: status.success?, version: status.success? ? out.strip : nil }
-      @foreman_probe[:version]
-    rescue Errno::ENOENT, Errno::EACCES
       @foreman_probe = { ok: false, version: nil }
-      nil
+
+      foreman_env_candidates.each do |candidate|
+        out, _err, status = begin
+          Open3.capture3(candidate, "foreman", "version")
+        rescue Errno::ENOENT, Errno::EACCES
+          # Not on this candidate's PATH, or not executable. Try the next one.
+          next
+        end
+
+        next unless status.success?
+
+        # Remember the environment that worked: the real spawn must use the same
+        # one, or the probe proves nothing.
+        @foreman_env = candidate
+        @foreman_probe = { ok: true, version: out.strip }
+        break
+      end
+
+      @foreman_probe[:version]
     end
 
     # One clear line, never a backtrace.
