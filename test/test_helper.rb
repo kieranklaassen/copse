@@ -50,16 +50,11 @@ module CopseTestHelpers
     out
   end
 
-  # Returns the pids of every descendant of `pid`, so teardown tests can assert
-  # nothing survived rather than trusting an exit status.
-  def descendant_pids(pid)
-    out = `ps -eo pid=,ppid=`
-    children = out.lines.map { |l| l.split.map(&:to_i) }
-    collect = lambda do |parent|
-      direct = children.select { |_, ppid| ppid == parent }.map(&:first)
-      direct + direct.flat_map { |c| collect.call(c) }
-    end
-    collect.call(pid)
+  # Removes the temp directory a test's `setup` created. Every suite that builds
+  # one needs exactly this, so it lives here rather than four times over.
+  def teardown
+    FileUtils.remove_entry(@dir) if @dir && File.exist?(@dir)
+    super
   end
 
   def alive?(pid)

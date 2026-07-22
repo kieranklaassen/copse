@@ -5,6 +5,7 @@ require "zlib"
 require_relative "copse/version"
 require_relative "copse/url_options"
 require_relative "copse/worktree"
+require_relative "copse/procfile"
 require_relative "copse/session"
 
 # Copse gives every Rails app and every git worktree its own hostname and its

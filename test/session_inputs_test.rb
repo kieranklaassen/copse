@@ -16,10 +16,6 @@ class SessionInputsTest < Minitest::Test
                                  companion_port: 9911)
   end
 
-  def teardown
-    FileUtils.remove_entry(@dir) if @dir && File.exist?(@dir)
-  end
-
   def session(procfile: nil)
     File.write(File.join(@root, "Procfile.dev"), procfile) if procfile
     Copse::Session.new(@worktree, root: @root, out: StringIO.new)

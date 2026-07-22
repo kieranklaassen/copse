@@ -19,10 +19,6 @@ class SessionLifecycleTest < Minitest::Test
     FileUtils.mkdir_p(@tmp)
   end
 
-  def teardown
-    FileUtils.remove_entry(@dir) if @dir && File.exist?(@dir)
-  end
-
   # Writes an executable script into the fake app's bin/. Deliberately
   # app-relative: a bare `sleep` would resolve from any working directory and so
   # would pass whether or not foreman was told where the app root is.
@@ -48,7 +44,10 @@ class SessionLifecycleTest < Minitest::Test
   def read_pid(path, timeout: 12)
     deadline = Time.now + timeout
     while Time.now < deadline
-      return Integer(File.read(path).strip) if File.exist?(path) && !File.read(path).strip.empty?
+      if File.exist?(path)
+        contents = File.read(path).strip
+        return Integer(contents) unless contents.empty?
+      end
 
       sleep 0.05
     end

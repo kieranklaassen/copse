@@ -11,10 +11,6 @@ class InstallGeneratorTest < Minitest::Test
     FileUtils.mkdir_p(File.join(@root, "bin"))
   end
 
-  def teardown
-    FileUtils.remove_entry(@dir) if @dir && File.exist?(@dir)
-  end
-
   def run_generator
     Copse::Generators::InstallGenerator.start(["--quiet"], destination_root: @root)
   end

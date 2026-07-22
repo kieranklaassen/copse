@@ -16,10 +16,6 @@ class RailtieTest < Minitest::Test
     @dir = Dir.mktmpdir("copse-rails")
   end
 
-  def teardown
-    FileUtils.remove_entry(@dir) if @dir && File.exist?(@dir)
-  end
-
   # Boots a minimal Rails app in a child process and returns what the railtie did.
   #
   # `preset` runs before initialize!, so a scenario can simulate an app that sets

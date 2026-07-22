@@ -235,10 +235,19 @@ class WorktreeTest < Minitest::Test
 
   ALPHABET = (("a".."z").to_a + ("0".."9").to_a).freeze
 
+  # Two tests need the same 1-port measurement, and each run is a 20,000 x 10
+  # Monte Carlo. Caching by argument tuple is safe because the result is a pure
+  # function of those arguments -- it introduces no cross-test ordering dependence.
+  COLLISION_RATES = {}
+
   # Deterministic Monte Carlo. The seed is the whole point: derivation is a pure
   # function, so the only randomness is the synthetic hostname corpus, and an
   # unseeded corpus makes the assertion flaky rather than meaningful.
   def collision_rate(names:, ports_per_name:, trials: 20_000, seed: 20_260_721)
+    key = [names, ports_per_name, trials, seed]
+    cached = COLLISION_RATES[key]
+    return cached if cached
+
     rng = Random.new(seed)
     collisions = 0
 
@@ -257,6 +266,6 @@ class WorktreeTest < Minitest::Test
       collisions += 1 if collided
     end
 
-    100.0 * collisions / trials
+    COLLISION_RATES[key] = 100.0 * collisions / trials
   end
 end
