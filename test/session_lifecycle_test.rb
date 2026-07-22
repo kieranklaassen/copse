@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "json"
 
 # Exercises the real process tree. Nothing here mocks a process: the point of the
 # unit is that exiting or interrupting leaves no orphans, and that is only
@@ -306,6 +307,46 @@ class SessionLifecycleTest < Minitest::Test
     pid, = spawn_copse
 
     assert_equal 3, wait_for_exit(pid).exitstatus
+  end
+
+  # --- The property the whole gem exists for (R5) ---------------------------
+
+  def test_the_web_process_inherits_stdin_and_the_foreground_process_group
+    # This is why copse exists: `binding.irb` needs the web process to hold the
+    # same stdin as the terminal and to be in the terminal's foreground process
+    # group. Whether a prompt visibly echoes needs a real TTY and stays a manual
+    # gate, but the two mechanical preconditions are checkable here -- and they are
+    # exactly what a daemon or a foreman-multiplexed pipe would break.
+    dump = File.join(@app, "web.probe")
+    File.write(File.join(@app, "bin", "web"), <<~RUBY)
+      #!/usr/bin/env ruby
+      require "json"
+      File.write(#{dump.inspect}, JSON.dump(
+        stdin_stat: [$stdin.stat.dev, $stdin.stat.ino],
+        stdin_tty: $stdin.tty?,
+        pgid: Process.getpgrp,
+        pid: Process.pid
+      ))
+    RUBY
+    File.chmod(0o755, File.join(@app, "bin", "web"))
+    procfile("web: bin/web\n")
+
+    pid, log = spawn_copse
+    wait_for_exit(pid)
+
+    assert File.exist?(dump), "the web process did not run: #{File.read(log)}"
+    probe = JSON.parse(File.read(dump))
+
+    # Same stdin object as copse's, not a pipe foreman created.
+    assert_equal [$stdin.stat.dev, $stdin.stat.ino], probe["stdin_stat"],
+                 "the web process did not inherit copse's stdin"
+
+    # Same process group as this runner, which copse inherited and passed straight
+    # through -- so the terminal's signals and input reach the web process. (Read
+    # from the runner rather than from copse's pid, which has already exited.)
+    assert_equal Process.getpgrp, probe["pgid"],
+                 "the web process was placed in its own process group, so it cannot " \
+                 "read from the terminal"
   end
 
   # --- What a child process actually receives (R8, KTD11) ------------------
