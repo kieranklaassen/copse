@@ -23,13 +23,19 @@ Gem::Specification.new do |spec|
   spec.metadata["source_code_uri"] = spec.homepage
   spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/main/CHANGELOG.md"
 
-  spec.files = Dir[
-    "lib/**/*.rb",
-    "lib/generators/**/*.tt",
-    "README.md",
-    "CHANGELOG.md",
-    "LICENSE.txt"
-  ]
+  # Anchored to this file's directory, not the caller's cwd. Bare `Dir[...]` globs
+  # resolve against the working directory, so `gem build path/to/copse.gemspec`
+  # from anywhere else produced a gem containing zero files -- with only a warning
+  # and exit status 0.
+  spec.files = Dir.chdir(__dir__) do
+    Dir[
+      "lib/**/*.rb",
+      "lib/generators/**/*.tt",
+      "README.md",
+      "CHANGELOG.md",
+      "LICENSE.txt"
+    ]
+  end
   spec.require_paths = ["lib"]
 
   # Zero dependencies, runtime or development. Development dependencies live in

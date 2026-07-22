@@ -48,12 +48,20 @@ jobs:
         run: gem build copse.gemspec
 
       - name: Verify the generator templates are packaged
+        # `set -euo pipefail` so a failed extraction cannot look like an empty gem.
+        # There is deliberately no `gem contents` fallback here: `gem contents` has
+        # no --spec-file flag, so an earlier version of this step always failed into
+        # its own `||` branch with the error hidden by 2>/dev/null -- a guard whose
+        # primary path never ran.
         run: |
+          set -euo pipefail
           gem_file=$(ls copse-*.gem)
-          contents=$(gem contents --spec-file "$gem_file" 2>/dev/null || tar -xOf "$gem_file" data.tar.gz | tar -tzf -)
+          contents=$(tar -xOf "$gem_file" data.tar.gz | tar -tzf -)
           echo "$contents"
           for required in \
             lib/copse.rb \
+            lib/copse/version.rb \
+            lib/copse/procfile.rb \
             lib/copse/railtie.rb \
             lib/copse/session.rb \
             lib/copse/url_options.rb \
@@ -64,3 +72,11 @@ jobs:
           do
             echo "$contents" | grep -qx "$required" || { echo "MISSING from gem: $required"; exit 1; }
           done
+
+      - name: Verify the packaged gem installs and loads
+        # The manifest check above proves the files are present; this proves the
+        # packaged artifact is actually usable.
+        run: |
+          set -euo pipefail
+          gem install --local --no-document "$(ls copse-*.gem)"
+          ruby -e 'gem "copse"; require "copse"; raise unless Copse::AVAILABLE_PORTS.size == 6975'

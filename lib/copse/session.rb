@@ -16,6 +16,12 @@ module Copse
     # invisible next to a Rails boot.
     FOREMAN_STARTUP_GRACE = 0.3
 
+    # How long teardown waits for a child to honour SIGTERM before SIGKILL. Chosen
+    # to sit just past foreman's own 5s escalation so its children get their
+    # graceful window first.
+    REAP_TIMEOUT = 6
+    REAP_POLL = 0.05
+
     INTERRUPTED_STATUS = 130
 
     attr_reader :worktree, :root
@@ -35,30 +41,60 @@ module Copse
     def start
       @out.puts "=> Copse: #{worktree.url}"
 
-      # No secondaries means no foreman -- not even a preflight. The Procfile the
-      # install generator writes has only a `web` line, so preflighting a tool
-      # this run will never use would refuse to boot the most common app. Running
-      # `foreman start` against an empty Procfile is fatal anyway.
-      return with_term_trap { run_foreground } unless secondaries?
+      # The guard spans everything after the banner, not just the foreground wait.
+      # The foreman probe spawns a child of its own, and a signal arriving during it
+      # used to escape the handler entirely -- which surfaced as a bogus "cannot run
+      # foreman" error rather than a clean interrupt.
+      guarded do
+        # No secondaries means no foreman -- not even a preflight. The Procfile the
+        # install generator writes has only a `web` line, so preflighting a tool
+        # this run will never use would refuse to boot the most common app. Running
+        # `foreman start` against an empty Procfile is fatal anyway.
+        next run_foreground unless secondaries?
 
-      unless foreman_available?
-        @out.puts foreman_error_message
-        return 1
-      end
-      @out.puts foreman_version_warning if foreman_outdated?
+        unless foreman_available?
+          @out.puts foreman_error_message
+          next 1
+        end
+        @out.puts foreman_version_warning if foreman_outdated?
 
-      dir, path = write_temp_procfile
-      @foreman_pid = spawn_foreman(path)
-
-      with_term_trap do
+        @foreman_pid = spawn_foreman(write_temp_procfile)
         report_if_foreman_died_early
         run_foreground
       end
     ensure
-      teardown(dir)
+      teardown
     end
 
     private
+
+    # Runs the body with SIGTERM converted to an Interrupt, and keeps that
+    # conversion in place while `start`'s `ensure` tears down.
+    #
+    # Two windows depend on this. Without the trap at all, SIGTERM kills the
+    # process outright and `ensure` never runs. With the trap restored too early, a
+    # second SIGTERM arriving during teardown kills us between `terminate_web` and
+    # `terminate_foreman` -- which was measured to leave the watcher alive.
+    # Interrupt is caught here rather than inside `run_foreground` so the foreman
+    # startup grace is covered too; otherwise a signal during that sleep escaped as
+    # a raw backtrace.
+    def guarded
+      previous = Signal.trap("TERM") { raise Interrupt }
+      @term_trap_previous = previous
+      yield
+    rescue Interrupt
+      # Ctrl-C, or a SIGTERM converted above. The TTY already delivered SIGINT to
+      # the whole foreground group, so there is nothing to announce -- `ensure`
+      # cleans up.
+      INTERRUPTED_STATUS
+    end
+
+    def restore_term_trap
+      return unless defined?(@term_trap_previous)
+
+      Signal.trap("TERM", @term_trap_previous || "DEFAULT")
+      remove_instance_variable(:@term_trap_previous)
+    end
 
     def run_foreground
       @web_pid = Process.spawn(web_env, web_command, chdir: root)
@@ -68,10 +104,6 @@ module Copse
       code = status.exitstatus || INTERRUPTED_STATUS
       report_port_collision if code != 0 && port_in_use?
       code
-    rescue Interrupt
-      # Ctrl-C. The TTY already delivered SIGINT to the whole foreground group, so
-      # there is nothing to announce -- just let `ensure` clean up.
-      INTERRUPTED_STATUS
     end
 
     def spawn_foreman(path)
@@ -108,21 +140,48 @@ module Copse
       @foreman_reaped = true
     end
 
-    def teardown(dir)
+    # Foreman is signalled *first*, then waited on.
+    #
+    # Ordering matters: `Process.waitpid` on the web process is unbounded, so a web
+    # process that delays or ignores SIGTERM used to park teardown here forever and
+    # foreman was never signalled at all -- every watcher survived. Signalling
+    # foreman up front means its own 5s SIGTERM-to-SIGKILL escalation runs in
+    # parallel with the web process shutting down.
+    def teardown
+      signal_foreman
       terminate_web
-      terminate_foreman
-      FileUtils.remove_entry(dir) if dir && File.exist?(dir)
+      reap_foreman
+      remove_temp_procfile
+      restore_term_trap
     end
 
     def terminate_web
       return if @web_pid.nil?
 
       Process.kill("TERM", @web_pid)
-      Process.waitpid(@web_pid)
+      reap(@web_pid, "the web process")
     rescue Errno::ESRCH, Errno::ECHILD
       # Already gone.
     ensure
       @web_pid = nil
+    end
+
+    # Waits for `pid`, escalating to SIGKILL rather than blocking forever. Teardown
+    # must always complete; a child that ignores SIGTERM is not a reason to hang.
+    def reap(pid, what, timeout: REAP_TIMEOUT)
+      deadline = Time.now + timeout
+      loop do
+        return if Process.waitpid(pid, Process::WNOHANG)
+        break if Time.now >= deadline
+
+        sleep REAP_POLL
+      end
+
+      @out.puts "copse: #{what} did not exit within #{timeout}s; sending SIGKILL."
+      Process.kill("KILL", pid)
+      Process.waitpid(pid)
+    rescue Errno::ESRCH, Errno::ECHILD
+      # Already gone.
     end
 
     # Signals foreman's own pid and lets foreman reap its children.
@@ -130,32 +189,34 @@ module Copse
     # Never a negative pgid. Foreman does not call setsid, so its process group is
     # the caller's own -- `Process.kill("-TERM", pgid)` would signal the
     # developer's shell session.
-    def terminate_foreman
+    # Signals foreman's own pid and lets foreman reap its children.
+    #
+    # Never a negative pgid. Foreman does not call setsid, so its process group is
+    # the caller's own -- `Process.kill("-TERM", pgid)` would signal the
+    # developer's shell session.
+    def signal_foreman
       return if @foreman_pid.nil? || @foreman_reaped
 
-      begin
-        Process.kill("TERM", @foreman_pid)
-      rescue Errno::ESRCH
-        # Expected on Ctrl-C: the TTY signalled foreman directly, because its
-        # children share this terminal's foreground process group.
-      end
+      Process.kill("TERM", @foreman_pid)
+    rescue Errno::ESRCH
+      # Expected on Ctrl-C: the TTY signalled foreman directly, because its
+      # children share this terminal's foreground process group.
+    end
 
-      begin
-        Process.waitpid(@foreman_pid)
-      rescue Errno::ECHILD
-        # Already reaped.
-      end
+    def reap_foreman
+      return if @foreman_pid.nil? || @foreman_reaped
+
+      reap(@foreman_pid, "foreman")
     ensure
       @foreman_pid = nil
     end
 
-    # Without a trap, SIGTERM kills this process outright and `ensure` never runs,
-    # which would leave foreman and its children behind.
-    def with_term_trap
-      previous = Signal.trap("TERM") { raise Interrupt }
-      yield
+    def remove_temp_procfile
+      return if @procfile_dir.nil?
+
+      FileUtils.remove_entry(@procfile_dir) if File.exist?(@procfile_dir)
     ensure
-      Signal.trap("TERM", previous || "DEFAULT")
+      @procfile_dir = nil
     end
 
     # Derived ports are uncoordinated by design, so collisions happen. Puma's
@@ -248,11 +309,19 @@ module Copse
     # The foreground command, with any explicit port flag removed so the derived
     # PORT applies. Falls back to `bin/rails server` when there is no Procfile, or
     # when a Procfile exists but names no `web` process.
+    # The foreground command goes through the same signal-transparency transform as
+    # the secondaries. Without it, a `web` line needing a shell (`... 2>&1`) made
+    # @web_pid the shell rather than the app: teardown reaped the shell instantly
+    # and the real server survived, reparented to pid 1, still holding the derived
+    # port. `exec` is only added when the command would have gone through /bin/sh
+    # anyway, so the common metacharacter-free case is untouched.
     def web_command
       entry = procfile&.web
       return "bin/rails server" if entry.nil?
 
-      Procfile.strip_port_flag(entry.command)
+      command, warning = Procfile.signal_transparent(Procfile.strip_port_flag(entry.command))
+      @out.puts "copse: `web` #{warning}" if warning
+      command
     end
 
     # Non-web entries. When a Procfile exists but has no `web` line, every entry
@@ -272,9 +341,12 @@ module Copse
     # derived hostnames are deliberately reproducible, so a predictable path in a
     # world-writable directory would be a symlink/TOCTOU surface.
     #
-    # Returns [directory, procfile_path]. The caller owns removing the directory.
+    # Returns the Procfile path. The directory is recorded on the instance the
+    # moment it exists, so teardown can remove it even if a later step in this
+    # method raises -- returning it to the caller would have leaked it.
     def write_temp_procfile
       dir = Dir.mktmpdir("copse-")
+      @procfile_dir = dir
       File.chmod(0o700, dir)
       path = File.join(dir, "Procfile")
 
@@ -288,7 +360,7 @@ module Copse
         file.write(lines.join)
       end
 
-      [dir, path]
+      path
     end
 
     # Whether `foreman start` will actually work.

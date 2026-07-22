@@ -82,6 +82,40 @@ class SessionInputsTest < Minitest::Test
     assert_equal "bin/rails s", s.web_command
   end
 
+  def test_web_command_goes_through_the_signal_transparency_transform
+    # Without this, a `web` line needing a shell made @web_pid the shell rather than
+    # the app: teardown reaped the shell instantly and the real server survived,
+    # reparented to pid 1, still holding the derived port.
+    s = session(procfile: "web: bin/rails server 2>&1\n")
+
+    assert_equal "exec bin/rails server 2>&1", s.web_command
+  end
+
+  def test_web_command_is_untouched_when_it_needs_no_shell
+    s = session(procfile: "web: env RUBY_DEBUG_OPEN=true bin/rails server\n")
+
+    assert_equal "env RUBY_DEBUG_OPEN=true bin/rails server", s.web_command
+  end
+
+  def test_web_command_strips_the_port_flag_before_transforming
+    s = session(procfile: "web: bin/rails s --port 3000 2>&1\n")
+
+    assert_equal "exec bin/rails s 2>&1", s.web_command
+  end
+
+  def test_the_temp_procfile_directory_is_recorded_before_the_file_is_written
+    # Recorded on the instance the moment mktmpdir returns, so teardown can remove
+    # it even if a later step in write_temp_procfile raises. Returning it to the
+    # caller instead leaked the directory on any mid-method failure.
+    s = session(procfile: "web: bin/rails server\ncss: bin/watch\n")
+    path = s.write_temp_procfile
+    begin
+      assert_equal File.dirname(path), s.instance_variable_get(:@procfile_dir)
+    ensure
+      FileUtils.remove_entry(File.dirname(path))
+    end
+  end
+
   def test_web_command_falls_back_when_there_is_no_procfile
     assert_equal "bin/rails server", session.web_command
     assert_empty session.secondaries
@@ -111,7 +145,8 @@ class SessionInputsTest < Minitest::Test
       log: echo starting; tail -f log/development.log
     PROC
 
-    dir, path = s.write_temp_procfile
+    path = s.write_temp_procfile
+    dir = File.dirname(path)
     begin
       contents = File.read(path)
 
@@ -126,7 +161,8 @@ class SessionInputsTest < Minitest::Test
   def test_the_temp_procfile_is_private
     s = session(procfile: "web: bin/rails server\ncss: bin/watch\n")
 
-    dir, path = s.write_temp_procfile
+    path = s.write_temp_procfile
+    dir = File.dirname(path)
     begin
       assert_equal "700", format("%o", File.stat(dir).mode & 0o777)
       assert_equal "600", format("%o", File.stat(path).mode & 0o777)
@@ -140,7 +176,8 @@ class SessionInputsTest < Minitest::Test
     File.write(File.join(@root, "Procfile.dev"), "web: bin/rails server\nlog: bin/watch | tee out\n")
     s = Copse::Session.new(@worktree, root: @root, out: out)
 
-    dir, path = s.write_temp_procfile
+    path = s.write_temp_procfile
+    dir = File.dirname(path)
     begin
       assert_includes out.string, "pipeline"
       assert_includes out.string, "`log`"

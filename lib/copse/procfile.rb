@@ -92,6 +92,9 @@ module Copse
     # placement, so those are left alone and warned about instead of silently
     # "fixed".
     def self.signal_transparent(command)
+      # A trailing separator would otherwise splice a bare `exec ` with nothing
+      # after it -- a silent no-op that leaves the shell in front of the process.
+      command = command.sub(/[\s;]+\z/, "")
       operators = top_level_operators(command)
 
       if operators.any? { |op| UNFIXABLE_SEPARATORS.include?(op[:token]) }
@@ -102,7 +105,7 @@ module Copse
 
       # A single command that still needs a shell (a redirect, a glob, a quoted
       # argument): prefixing exec replaces the shell with it, which is correct.
-      return ["exec #{command}", nil] if operators.empty?
+      return [exec_prefixed(command), nil] if operators.empty?
 
       # A chain: exec the last command. A Procfile entry whose final command is
       # short-lived would exit immediately and stop being a long-running process
@@ -113,7 +116,19 @@ module Copse
       head = command[0, cut]
       tail = command[cut..].to_s
       indent = tail[/\A\s*/]
-      ["#{head}#{indent}exec #{tail.lstrip}", nil]
+      ["#{head}#{indent}#{exec_prefixed(tail.lstrip)}", nil]
+    end
+
+    # `exec` cannot take a leading VAR=value assignment: `exec FOO=1 cmd` makes the
+    # shell look for a program literally named `FOO=1` and fail with exit 127. Going
+    # through env(1) preserves the assignment and still replaces the shell, so the
+    # recorded pid is the real process either way.
+    ASSIGNMENT_PREFIX = /\A[A-Za-z_][A-Za-z0-9_]*=/.freeze
+
+    def self.exec_prefixed(command)
+      return "exec env #{command}" if command.match?(ASSIGNMENT_PREFIX)
+
+      "exec #{command}"
     end
 
     # Finds control operators outside quotes.
@@ -148,6 +163,12 @@ module Copse
             if command[index + 1] == "&"
               operators << { token: "&&", at: index }
               index += 1
+            elsif redirect_ampersand?(command, index)
+              # Part of a redirect (`2>&1`, `>&2`, `&>file`), not a control
+              # operator. Reading it as a background `&` made a perfectly ordinary
+              # `yarn build --watch 2>&1` skip the exec transform and keep a shell
+              # in front of the process -- a real orphan on any /bin/sh that forks.
+              nil
             else
               operators << { token: "&", at: index }
             end
@@ -165,6 +186,16 @@ module Copse
       end
 
       operators
+    end
+
+    # True when the `&` at `index` belongs to a redirect rather than being a
+    # control operator: `2>&1` and `>&2` have `>` (or `<`) before it, `&>file` has
+    # `>` after it.
+    def self.redirect_ampersand?(command, index)
+      return true if command[index + 1] == ">"
+
+      before = command[0, index].rstrip
+      before.end_with?(">", "<")
     end
 
     def self.unfixable_warning(_command, operators)

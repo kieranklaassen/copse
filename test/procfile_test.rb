@@ -139,6 +139,74 @@ class ProcfileTest < Minitest::Test
     assert_equal %(exec bin/run --filter "a|b"), command
   end
 
+  # --- Regressions from code review ----------------------------------------
+
+  def test_an_ampersand_inside_a_redirect_is_not_a_background_operator
+    # `2>&1` is a redirect, not a control operator. Reading it as a background `&`
+    # made an ordinary watcher line skip the transform entirely and keep a shell in
+    # front of the process -- a real orphan on any /bin/sh that forks.
+    {
+      "yarn build --watch 2>&1" => "exec yarn build --watch 2>&1",
+      "bin/jobs >> log/jobs.log 2>&1" => "exec bin/jobs >> log/jobs.log 2>&1",
+      "bin/x >&2" => "exec bin/x >&2",
+      "bin/x &> out.log" => "exec bin/x &> out.log"
+    }.each do |input, expected|
+      command, warning = Copse::Procfile.signal_transparent(input)
+
+      assert_nil warning, "#{input.inspect} was misread as a background command"
+      assert_equal expected, command
+    end
+
+    assert_empty Copse::Procfile.top_level_operators("a 2>&1")
+  end
+
+  def test_a_real_background_operator_is_still_detected
+    _command, warning = Copse::Procfile.signal_transparent("bin/jobs & bin/tail")
+
+    refute_nil warning, "a genuine background & must still be warned about"
+    assert_includes warning, "background"
+  end
+
+  def test_a_trailing_separator_does_not_splice_a_bare_exec
+    # Without normalisation this produced "echo a; bin/b;exec " -- a no-op exec
+    # with no command, silently leaving the shell in front of the real process.
+    ["echo a; bin/b;", "echo a; bin/b ;", "echo a; bin/b;  "].each do |input|
+      command, warning = Copse::Procfile.signal_transparent(input)
+
+      assert_equal "echo a; exec bin/b", command
+      assert_nil warning
+      refute_match(/exec\s*\z/, command, "spliced a bare exec with no command")
+    end
+  end
+
+  def test_an_assignment_prefixed_segment_goes_through_env
+    # `exec FOO=1 cmd` makes the shell look for a program literally named "FOO=1"
+    # and fail with exit 127, so the assignment form has to route through env(1).
+    command, = Copse::Procfile.signal_transparent(%(NODE_OPTIONS="--max-old-space-size=4096" yarn build))
+
+    assert_equal %(exec env NODE_OPTIONS="--max-old-space-size=4096" yarn build), command
+
+    chained, = Copse::Procfile.signal_transparent("echo hi; FOO=1 bin/watch")
+
+    assert_equal "echo hi; exec env FOO=1 bin/watch", chained
+  end
+
+  def test_the_rewritten_command_is_accepted_by_the_shell
+    # The failure this guards is a rewrite /bin/sh refuses: the old assignment form
+    # exited 127 while the suite stayed green, because nothing ever ran the output.
+    ["yarn --version 2>&1", "echo a; echo b", %(FOO=1 /bin/echo ok), %(bin/x 2>&1)].each do |input|
+      command, warning = Copse::Procfile.signal_transparent(input)
+      next if warning
+
+      # Substitute a command that certainly exists, keeping the transform's shape.
+      probe = command.sub("yarn --version", "/bin/echo ok").sub("bin/x", "/bin/echo ok")
+      out, err, status = Open3.capture3("/bin/sh", "-c", probe)
+
+      assert_predicate status, :success?,
+                       "the shell refused #{probe.inspect}: #{err}#{out}"
+    end
+  end
+
   def test_a_pipeline_is_warned_about_and_left_unmodified
     # No exec placement collapses a pipeline into one pid: the recorded process is
     # the shell awaiting the whole pipeline.

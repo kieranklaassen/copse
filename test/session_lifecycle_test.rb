@@ -2,6 +2,7 @@
 
 require "test_helper"
 require "json"
+require "socket"
 
 # Exercises the real process tree. Nothing here mocks a process: the point of the
 # unit is that exiting or interrupting leaves no orphans, and that is only
@@ -40,6 +41,17 @@ class SessionLifecycleTest < Minitest::Test
   end
 
   def pidfile(name) = File.join(@app, "#{name}.pid")
+
+  # Waits for a file to appear with any content, without parsing it as a pid.
+  def read_pid_file(path, timeout: 12)
+    deadline = Time.now + timeout
+    while Time.now < deadline
+      return File.read(path).strip if File.exist?(path) && !File.read(path).strip.empty?
+
+      sleep 0.05
+    end
+    nil
+  end
 
   def read_pid(path, timeout: 12)
     deadline = Time.now + timeout
@@ -346,6 +358,121 @@ class SessionLifecycleTest < Minitest::Test
     assert_equal Process.getpgrp, probe["pgid"],
                  "the web process was placed in its own process group, so it cannot " \
                  "read from the terminal"
+  end
+
+  # --- Regressions from code review ----------------------------------------
+
+  def test_teardown_completes_even_when_the_web_process_ignores_sigterm
+    # The failure this guards: teardown used to wait on the web process *before*
+    # signalling foreman, with no bound. A web process that ignores SIGTERM parked
+    # teardown forever and foreman was never signalled at all, so every watcher
+    # survived. Foreman is now signalled first and both waits escalate to SIGKILL.
+    long_running("watcher", pidfile("watcher"))
+    bin("web", "trap '' TERM\necho ready > #{pidfile('ready')}\nwhile :; do sleep 0.2; done")
+    procfile("web: bin/web\ncss: bin/watcher\n")
+
+    pid, log = spawn_copse
+    watcher = read_pid(pidfile("watcher"))
+    refute_nil watcher, "the secondary never started: #{File.read(log)}"
+    refute_nil read_pid_file(pidfile("ready")), "the web process never came up"
+
+    Process.kill("TERM", pid)
+    wait_for_exit(pid, timeout: 30)
+
+    refute_alive watcher, "the css watcher (foreman was never signalled)"
+    assert_empty copse_temp_dirs
+  end
+
+  def test_a_shell_needing_web_line_still_dies_on_teardown
+    # With the web command not passing through the transform, @web_pid was the shell
+    # and the real process was left reparented to pid 1.
+    marker = pidfile("realweb")
+    bin("realweb", "echo $$ > #{marker}\nexec sleep 300")
+    procfile("web: bin/realweb 2>&1\ncss: bin/watcher\n")
+    long_running("watcher", pidfile("watcher"))
+
+    pid, log = spawn_copse
+    real = read_pid(marker)
+    refute_nil real, "the web process never started: #{File.read(log)}"
+
+    Process.kill("TERM", pid)
+    wait_for_exit(pid, timeout: 30)
+
+    refute_alive real, "the real web process behind the shell"
+  end
+
+  def test_interrupting_reports_the_conventional_exit_status
+    bin("web", "exec sleep 300")
+    procfile("web: bin/web\n")
+
+    pid, = spawn_copse(pgroup: true)
+    sleep 0.4
+    Process.kill("-INT", Process.getpgid(pid))
+    status = wait_for_exit(pid)
+
+    assert_equal Copse::Session::INTERRUPTED_STATUS, status.exitstatus
+  end
+
+  def test_a_signal_anywhere_in_startup_exits_cleanly
+    # Sweeps the whole startup sequence rather than one window: the foreman probe
+    # (which spawns its own child), the temp-Procfile write, the spawn, the 0.3s
+    # grace sleep, and the foreground wait. Every one of those used to be able to
+    # escape the handler -- as a raw backtrace, or as a bogus "cannot run foreman"
+    # when the probe itself was interrupted.
+    # Delays are measured from the banner, not from spawn: before that, the Ruby
+    # interpreter is still starting up and no program can have a handler installed.
+    [0.0, 0.15, 0.3, 0.55].each do |delay|
+      long_running("watcher", pidfile("watcher"))
+      bin("web", "exec sleep 300")
+      procfile("web: bin/web\ncss: bin/watcher\n")
+
+      pid, log = spawn_copse
+      deadline = Time.now + 15
+      sleep 0.02 until (File.exist?(log) && File.read(log).include?("=> Copse:")) || Time.now > deadline
+      sleep delay
+      Process.kill("TERM", pid)
+      status = wait_for_exit(pid, timeout: 30)
+      output = File.read(log)
+
+      refute_match(/session\.rb:\d+:in/, output,
+                   "a backtrace reached the developer (signal at #{delay}s)")
+      refute_includes output, "cannot run `foreman`",
+                      "an interrupted probe was misreported as a missing foreman (#{delay}s)"
+      assert_equal Copse::Session::INTERRUPTED_STATUS, status.exitstatus,
+                   "signal at #{delay}s did not exit cleanly: #{output}"
+      assert_empty copse_temp_dirs, "temp Procfile left behind (signal at #{delay}s)"
+
+      FileUtils.rm_f(Dir.glob(File.join(@app, "*.pid")))
+    end
+  end
+
+  def test_a_derived_port_collision_is_named_rather_than_left_a_mystery
+    port = Copse.port_for("cora.localhost")
+    holder = TCPServer.new("127.0.0.1", port)
+    begin
+      bin("web", "exit 1")
+      procfile("web: bin/web\n")
+
+      pid, log = spawn_copse
+      wait_for_exit(pid)
+      output = File.read(log)
+
+      assert_includes output, port.to_s
+      assert_includes output, "cora.localhost"
+      assert_includes output, "already in use"
+    ensure
+      holder.close
+    end
+  end
+
+  def test_no_collision_message_when_the_port_is_free
+    bin("web", "exit 1")
+    procfile("web: bin/web\n")
+
+    pid, log = spawn_copse
+    wait_for_exit(pid)
+
+    refute_includes File.read(log), "already in use"
   end
 
   # --- What a child process actually receives (R8, KTD11) ------------------
