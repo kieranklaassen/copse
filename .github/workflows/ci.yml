@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Ruby ${{ matrix.ruby }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both operating systems are required, not belt-and-braces: process
+        # reaping and `*.localhost` resolution are exactly where they diverge, and
+        # /bin/sh is dash on Ubuntu and bash-in-sh-mode on macOS, which is what the
+        # exec-transform tests exercise.
+        os: [ubuntu-latest, macos-latest]
+        ruby: ["3.2", "3.3", "3.4"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+
+      - name: Run tests
+        run: bundle exec rake test
+
+      - name: Load outside Rails
+        run: ruby -Ilib -e "require 'copse'; raise unless Copse::AVAILABLE_PORTS.size == 6975"
+
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+
+      - name: Build the gem
+        run: gem build copse.gemspec
+
+      - name: Verify the generator templates are packaged
+        run: |
+          gem_file=$(ls copse-*.gem)
+          contents=$(gem contents --spec-file "$gem_file" 2>/dev/null || tar -xOf "$gem_file" data.tar.gz | tar -tzf -)
+          echo "$contents"
+          for required in \
+            lib/copse.rb \
+            lib/copse/railtie.rb \
+            lib/copse/session.rb \
+            lib/copse/url_options.rb \
+            lib/copse/worktree.rb \
+            lib/generators/copse/install_generator.rb \
+            lib/generators/copse/templates/dev.tt \
+            lib/generators/copse/templates/Procfile.dev.tt
+          do
+            echo "$contents" | grep -qx "$required" || { echo "MISSING from gem: $required"; exit 1; }
+          done
