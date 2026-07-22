@@ -308,6 +308,52 @@ class SessionLifecycleTest < Minitest::Test
     assert_equal 3, wait_for_exit(pid).exitstatus
   end
 
+  # --- What a child process actually receives (R8, KTD11) ------------------
+
+  def test_the_foreground_process_receives_the_copse_variables
+    dump = File.join(@app, "web.env")
+    bin("web", "env > #{dump}\nexit 0")
+    procfile("web: bin/web\n")
+
+    pid, log = spawn_copse
+    wait_for_exit(pid)
+
+    env = File.read(dump).lines.to_h { |l| l.chomp.split("=", 2) }
+
+    assert_equal Copse.port_for("cora.localhost").to_s, env["PORT"], File.read(log)
+    assert_equal Copse.port_for("cora.localhost").to_s, env["COPSE_PORT"]
+    assert_equal "cora.localhost", env["COPSE_HOST"]
+    assert_equal "http://cora.localhost:#{Copse.port_for('cora.localhost')}", env["COPSE_URL"]
+    assert_equal Copse.companion_port_for("cora.localhost").to_s, env["VITE_RUBY_PORT"]
+  end
+
+  def test_foreman_rewrites_port_for_its_children_but_not_copse_port
+    # The reason COPSE_PORT exists. Foreman derives each child's PORT as
+    # base_port + index * 100, so the second secondary sees a port copse never
+    # derived -- one that can leave the 3000..9999 range entirely or land on a
+    # reserved service port. COPSE_PORT is the name foreman does not touch.
+    first = File.join(@app, "first.env")
+    second = File.join(@app, "second.env")
+    bin("first", "env > #{first}\nexec sleep 300")
+    bin("second", "env > #{second}\nexec sleep 300")
+    bin("web", "sleep 2.5")
+    procfile("web: bin/web\nfirst: bin/first\nsecond: bin/second\n")
+
+    pid, log = spawn_copse
+    wait_for_exit(pid)
+
+    assert File.exist?(second), "the second secondary never ran: #{File.read(log)}"
+    env = File.read(second).lines.to_h { |l| l.chomp.split("=", 2) }
+    derived = Copse.port_for("cora.localhost")
+
+    assert_equal derived.to_s, env["COPSE_PORT"],
+                 "COPSE_PORT must survive foreman untouched"
+    assert_equal (derived + 100).to_s, env["PORT"],
+                 "expected foreman's per-child PORT arithmetic (base + index * 100)"
+    refute_equal env["COPSE_PORT"], env["PORT"],
+                 "if these matched, COPSE_PORT would be redundant"
+  end
+
   # --- Temp directory cleanup ---------------------------------------------
 
   def test_the_temp_directory_is_removed_when_web_exits
