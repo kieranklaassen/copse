@@ -1,0 +1,252 @@
+# frozen_string_literal: true
+
+require "test_helper"
+
+# The spawn-free half of Session: environment assembly, the temporary Procfile,
+# and the foreman probe. The lifecycle is exercised in session_lifecycle_test.rb.
+class SessionInputsTest < Minitest::Test
+  FakeWorktree = Struct.new(:root, :host, :port, :companion_port, keyword_init: true) do
+    def url = "http://#{host}:#{port}"
+  end
+
+  def setup
+    @dir = Dir.mktmpdir("copse-session")
+    @root = File.realpath(@dir)
+    @worktree = FakeWorktree.new(root: @root, host: "cora.localhost", port: 5368,
+                                 companion_port: 9911)
+  end
+
+  def teardown
+    FileUtils.remove_entry(@dir) if @dir && File.exist?(@dir)
+  end
+
+  def session(procfile: nil)
+    File.write(File.join(@root, "Procfile.dev"), procfile) if procfile
+    Copse::Session.new(@worktree, root: @root, out: StringIO.new)
+  end
+
+  # --- Environment (R8, KTD11) ----------------------------------------------
+
+  def test_exports_the_copse_variables
+    env = session.copse_env
+
+    assert_equal "5368", env["PORT"]
+    assert_equal "5368", env["COPSE_PORT"]
+    assert_equal "cora.localhost", env["COPSE_HOST"]
+    assert_equal "http://cora.localhost:5368", env["COPSE_URL"]
+    assert_equal "9911", env["VITE_RUBY_PORT"]
+  end
+
+  def test_copse_port_duplicates_port_because_foreman_rewrites_port
+    # foreman spawns each child with PORT = base_port + index * 100, so a
+    # secondary never sees the derived port under the name PORT.
+    env = session.copse_env
+
+    assert_equal env["PORT"], env["COPSE_PORT"]
+  end
+
+  def test_the_web_environment_keeps_the_bundler_environment
+    # The foreground process is the Rails app; it needs its bundle.
+    out, _err, status = Open3.capture3(
+      session.web_env, "ruby", "-e", "puts ENV.fetch('BUNDLE_GEMFILE', 'ABSENT')"
+    )
+
+    assert_predicate status, :success?
+    refute_equal "ABSENT", out.strip,
+                 "the web process lost its bundle, which would break `require`"
+  end
+
+  def test_the_foreman_environment_drops_the_bundler_environment
+    # Proven by observing a real child process, not by inspecting the hash:
+    # Process.spawn merges rather than replaces, so handing it
+    # Bundler.original_env would leave the inherited BUNDLE_* keys in place.
+    out, _err, status = Open3.capture3(
+      session.foreman_env, "ruby", "-e", "puts ENV.fetch('BUNDLE_GEMFILE', 'ABSENT')"
+    )
+
+    assert_predicate status, :success?
+    assert_equal "ABSENT", out.strip,
+                 "foreman would inherit the bundle and fail with 'not currently included in the bundle'"
+  end
+
+  def test_the_foreman_environment_still_carries_the_copse_variables
+    out, _err, = Open3.capture3(
+      session.foreman_env, "ruby", "-e", "puts ENV.fetch('COPSE_PORT', 'ABSENT')"
+    )
+
+    assert_equal "5368", out.strip
+  end
+
+  # --- Foreground command (Q4) ----------------------------------------------
+
+  def test_web_command_has_its_explicit_port_flag_stripped
+    # vite_ruby's own example Procfile ships this line.
+    s = session(procfile: "web: bin/rails s --port 3000\nvite: bin/vite dev\n")
+
+    assert_equal "bin/rails s", s.web_command
+  end
+
+  def test_web_command_falls_back_when_there_is_no_procfile
+    assert_equal "bin/rails server", session.web_command
+    assert_empty session.secondaries
+    refute_predicate session, :secondaries?
+  end
+
+  def test_a_procfile_with_no_web_line_falls_back_and_treats_everything_as_secondary
+    s = session(procfile: "worker: bin/jobs\ncss: bin/watch\n")
+
+    assert_equal "bin/rails server", s.web_command
+    assert_equal %w[worker css], s.secondaries.map(&:name)
+  end
+
+  def test_a_procfile_with_only_a_web_line_has_no_secondaries
+    s = session(procfile: "web: bin/rails server\n")
+
+    assert_equal "bin/rails server", s.web_command
+    refute_predicate s, :secondaries?
+  end
+
+  # --- Temporary Procfile ---------------------------------------------------
+
+  def test_writes_secondaries_with_exec_inserted
+    s = session(procfile: <<~PROC)
+      web: bin/rails server
+      css: bin/rails tailwindcss:watch
+      log: echo starting; tail -f log/development.log
+    PROC
+
+    dir, path = s.write_temp_procfile
+    begin
+      contents = File.read(path)
+
+      refute_includes contents, "web:", "the foreground process must not go to foreman"
+      assert_includes contents, "css: bin/rails tailwindcss:watch"
+      assert_includes contents, "log: echo starting; exec tail -f log/development.log"
+    ensure
+      FileUtils.remove_entry(dir)
+    end
+  end
+
+  def test_the_temp_procfile_is_private
+    s = session(procfile: "web: bin/rails server\ncss: bin/watch\n")
+
+    dir, path = s.write_temp_procfile
+    begin
+      assert_equal "700", format("%o", File.stat(dir).mode & 0o777)
+      assert_equal "600", format("%o", File.stat(path).mode & 0o777)
+    ensure
+      FileUtils.remove_entry(dir)
+    end
+  end
+
+  def test_warns_once_about_a_line_it_cannot_make_signal_transparent
+    out = StringIO.new
+    File.write(File.join(@root, "Procfile.dev"), "web: bin/rails server\nlog: bin/watch | tee out\n")
+    s = Copse::Session.new(@worktree, root: @root, out: out)
+
+    dir, path = s.write_temp_procfile
+    begin
+      assert_includes out.string, "pipeline"
+      assert_includes out.string, "`log`"
+      # Left unmodified rather than silently "fixed".
+      assert_includes File.read(path), "log: bin/watch | tee out"
+    ensure
+      FileUtils.remove_entry(dir)
+    end
+  end
+
+  # --- Foreman probe (KTD9) -------------------------------------------------
+
+  def test_the_probe_succeeds_when_foreman_works
+    # foreman is a development dependency precisely so this is exercised rather
+    # than skipped.
+    assert_predicate session, :foreman_available?
+    refute_nil session.foreman_version
+  end
+
+  def test_the_probe_reports_a_usable_version
+    assert_operator Gem::Version.new(session.foreman_version), :>=,
+                    Gem::Version.new(Copse::Session::MIN_FOREMAN_VERSION)
+    refute_predicate session, :foreman_outdated?
+  end
+
+  def test_the_foreman_environment_restores_the_pre_bundler_path
+    # Bundler prepends its own bin directory to PATH. Restoring the original is
+    # deliberate: foreman must resolve the way it would outside the bundle, which
+    # is exactly what Rails' own /bin/sh `bin/dev` achieves. It also means
+    # ENV["PATH"] is not the seam the probe reads -- see PinnedPathSession below.
+    skip "not running under bundler" unless defined?(Bundler) && Bundler.respond_to?(:original_env)
+
+    assert_equal Bundler.original_env["PATH"], session.foreman_env["PATH"]
+  end
+
+  # Pins PATH for the probe. Necessary because foreman_env deliberately restores
+  # the pre-bundler PATH, so setting ENV["PATH"] cannot reach it.
+  class PinnedPathSession < Copse::Session
+    def initialize(*args, path:, **kwargs)
+      super(*args, **kwargs)
+      @path = path
+    end
+
+    def foreman_env
+      super.merge("PATH" => @path)
+    end
+  end
+
+  def pinned_session(path)
+    PinnedPathSession.new(@worktree, root: @root, out: StringIO.new, path: path)
+  end
+
+  def test_the_probe_fails_when_foreman_is_not_on_path
+    s = pinned_session("")
+
+    refute_predicate s, :foreman_available?
+    assert_nil s.foreman_version
+  end
+
+  def test_the_probe_swallows_the_shim_backtrace
+    # The failure mode this exists for: a version-manager shim that exists and is
+    # executable, but explodes with a Gem::GemNotFoundException when run. `command
+    # -v` and File.executable? both pass on it; only running it tells the truth.
+    shim_dir = File.join(@root, "bin")
+    FileUtils.mkdir_p(shim_dir)
+    shim = File.join(shim_dir, "foreman")
+    File.write(shim, <<~SH)
+      #!/bin/sh
+      echo "can't find gem foreman (>= 0.a) with executable foreman (Gem::GemNotFoundException)" >&2
+      exit 1
+    SH
+    File.chmod(0o755, shim)
+
+    s = pinned_session(shim_dir)
+
+    assert File.executable?(shim), "the shim is executable, so a file check would pass it"
+    refute_predicate s, :foreman_available?, "probing must catch what a file check cannot"
+    assert_nil s.foreman_version
+  end
+
+  def test_the_probe_reports_an_outdated_foreman
+    stub_dir = File.join(@root, "old")
+    FileUtils.mkdir_p(stub_dir)
+    stub = File.join(stub_dir, "foreman")
+    File.write(stub, "#!/bin/sh\necho 0.87.2\n")
+    File.chmod(0o755, stub)
+
+    s = pinned_session(stub_dir)
+
+    assert_predicate s, :foreman_available?
+    assert_equal "0.87.2", s.foreman_version
+    assert_predicate s, :foreman_outdated?
+    assert_includes s.foreman_version_warning, Copse::Session::MIN_FOREMAN_VERSION
+  end
+
+  def test_the_error_message_names_a_cause_and_carries_no_backtrace
+    s = session(procfile: "web: bin/rails server\ncss: bin/watch\n")
+    message = s.foreman_error_message
+
+    assert_includes message, "Gemfile"
+    assert_includes message, "version manager"
+    refute_match(/\.rb:\d+/, message, "the error leaked a backtrace")
+    assert_equal 1, message.lines.size
+  end
+end
