@@ -9,9 +9,14 @@ require "tmpdir"
 module CopseTestHelpers
   # Builds a throwaway git repository and yields its path. Used by the identity
   # tests, which shell out to real git rather than stubbing it.
-  def with_git_repo(branch: "main")
+  #
+  # `name` becomes the repository's directory name, because that is what the
+  # hostname is derived from -- so tests ask for the name they need rather than
+  # moving the directory afterwards (which would break tmpdir cleanup).
+  def with_git_repo(name: "app", branch: "main")
     Dir.mktmpdir("copse-repo") do |dir|
-      root = File.realpath(dir)
+      root = File.join(File.realpath(dir), name)
+      FileUtils.mkdir_p(root)
       git(root, "init", "--initial-branch", branch)
       git(root, "config", "user.email", "test@example.com")
       git(root, "config", "user.name", "Copse Test")
@@ -22,10 +27,12 @@ module CopseTestHelpers
     end
   end
 
-  # Adds a linked worktree to `root` on a new branch and yields its path.
-  def with_linked_worktree(root, branch)
-    Dir.mktmpdir("copse-linked") do |dir|
-      path = File.join(File.realpath(dir), "checkout")
+  # Adds a linked worktree to `root` on a new branch and yields its path. `dir`
+  # names the checkout directory, which matters for the detached-HEAD fallback
+  # and for proving the branch wins over a conventional directory name.
+  def with_linked_worktree(root, branch, dir: "checkout")
+    Dir.mktmpdir("copse-linked") do |tmp|
+      path = File.join(File.realpath(tmp), dir)
       git(root, "worktree", "add", "-b", branch, path)
       begin
         yield path
