@@ -22,11 +22,19 @@ class OvermindTest < Minitest::Test
   end
 
   def setup
+    # exec_overmind chdirs, and this process is not replaced by an exec here, so the
+    # cwd has to be put back before teardown removes the directory it moved into.
+    @cwd = Dir.pwd
     @dir = Dir.mktmpdir("copse-overmind")
     @root = File.realpath(@dir)
     @worktree = FakeWorktree.new(root: @root, host: "cora.localhost", port: 5368,
                                  companion_port: 9911)
     @out = StringIO.new
+  end
+
+  def teardown
+    Dir.chdir(@cwd)
+    super
   end
 
   def session(procfile)
@@ -83,6 +91,17 @@ class OvermindTest < Minitest::Test
     assert_equal [File.join(@root, "Procfile.dev")],
                  s.exec_argv.grep(/Procfile/),
                  "the app's own Procfile.dev is what overmind runs"
+  end
+
+  def test_runs_overmind_from_the_app_root
+    # `.overmind.sock` is created relative to overmind's own cwd, so `overmind
+    # connect web` from the app root only finds it if overmind started there.
+    s = session("web: bin/rails server\n")
+
+    Dir.chdir(Dir.tmpdir)
+    s.exec_overmind
+
+    assert_equal @root, File.realpath(Dir.pwd)
   end
 
   # --- The `web` position warning ------------------------------------------
