@@ -80,9 +80,9 @@ Changing the range or the reserved list would move nearly every derived port, so
 | `COPSE_PORT` | the derived port |
 | `PORT` | the derived port — **`web` process only** |
 | `VITE_RUBY_PORT` | the derived companion port |
-| `COPSE_DATABASE_SUFFIX` | `fix_billing` — **linked worktrees only**, absent in a main one |
+| `COPSE_DATABASE_SUFFIX` | `fix_billing` — **linked worktrees only**, actively unset in a main one |
 
-`COPSE_DATABASE_SUFFIX` is exported for your processes to read; Copse never reads it back. The rename below is derived from the checkout on disk, so a copy of this variable that outlives its session — a shell opened from a linked worktree, a leftover line in `.env` — can't rename a main worktree's database.
+`COPSE_DATABASE_SUFFIX` is exported for your processes to read; Copse never reads it back. In a main worktree it's *removed* from the child environment rather than merely left unset, so a copy inherited from another worktree's session can't be believed. And the rename below is derived from the checkout on disk, so no stale copy of this variable — a shell opened from a linked worktree, a leftover line in `.env` — can rename a main worktree's database.
 
 **In a non-`web` process, read `COPSE_PORT`, not `PORT`.** Foreman assigns its children `base_port + index * 100`, so a secondary's `PORT` is a number Copse never derived. Copse deliberately hands foreman an offset base, so no secondary is ever given the `web` process's own port.
 

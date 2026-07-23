@@ -40,10 +40,22 @@ class SessionInputsTest < Minitest::Test
     assert_equal "fix_billing", session.copse_env["COPSE_DATABASE_SUFFIX"]
   end
 
-  def test_omits_the_database_suffix_in_a_main_worktree
-    # Absent rather than empty: a main worktree keeps its plain database name, and
-    # Process.spawn reads a nil value as "unset this variable".
-    refute_includes session.copse_env, "COPSE_DATABASE_SUFFIX"
+  def test_unsets_the_database_suffix_in_a_main_worktree
+    # A main worktree keeps its plain database name, so its children must not see a
+    # suffix -- including one inherited from a shell opened inside some other
+    # worktree's session. Proven on a real child process, because Process.spawn
+    # merges its env hash rather than replacing the environment: omitting the key
+    # would leave the inherited value in place, and only nil removes it.
+    ENV["COPSE_DATABASE_SUFFIX"] = "stale_from_another_worktree"
+
+    out, _err, status = Open3.capture3(
+      session.copse_env, "ruby", "-e", "puts ENV.fetch('COPSE_DATABASE_SUFFIX', 'ABSENT')"
+    )
+
+    assert_predicate status, :success?
+    assert_equal "ABSENT", out.strip
+  ensure
+    ENV.delete("COPSE_DATABASE_SUFFIX")
   end
 
   def test_copse_port_duplicates_port_because_foreman_rewrites_port

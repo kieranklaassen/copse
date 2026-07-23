@@ -13,7 +13,9 @@
   `db:prepare` and `bin/rails console` reach the same database as `bin/dev`, and
   a stale `COPSE_DATABASE_SUFFIX` cannot rename a main worktree's database.
 - Exports `COPSE_DATABASE_SUFFIX` in a linked worktree, for other processes to
-  read. Copse never reads it back.
+  read; Copse never reads it back. In a main worktree it is removed from the child
+  environment, so a stale value inherited from another worktree's session cannot
+  be believed there either.
 
 ## 0.1.0 (2026-07-23)
 
