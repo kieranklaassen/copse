@@ -20,6 +20,17 @@ First release.
   when Copse booted the app and only when the app has not set its own `host`.
 - `bin/rails generate copse:install` wires up `bin/dev` and creates a minimal
   `Procfile.dev` only when the app has none.
+- Supports Overmind as an alternative supervisor:
+  `copse:install --process-manager=overmind` writes a `bin/dev` that hands the
+  whole `Procfile.dev`, `web` included, to `overmind start` with the derived
+  environment — no split session, because Overmind's per-process pty already
+  keeps the debugger working. An app whose `bin/dev` already drives Overmind gets
+  that variant by default rather than being downgraded to foreman. Overmind is
+  probed at run time, so a teammate without it falls back to the foreman session.
+  The derived port is passed to Overmind as `-p` and `OVERMIND_SKIP_ENV=1` is set,
+  so no env file can beat it — the same reason foreman is given `--env /dev/null`.
+- Warns when a Procfile entry runs the Tailwind CLI with a bare `--watch`, which
+  exits when stdin closes and so ends the whole foreman session with status 0.
 
 ### Notes
 

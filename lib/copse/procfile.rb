@@ -217,6 +217,25 @@ module Copse
       before.end_with?(">", "<")
     end
 
+    # A bare `--watch` on the Tailwind CLI, which is fatal under foreman.
+    #
+    # `tailwindcss --watch` exits when stdin closes. Overmind gives every process a
+    # pty so stdin stays open; foreman does not, so the watcher exits **0** a
+    # second or two after boot and foreman's cascade takes `web` down with it. The
+    # zero status makes it read like an intentional shutdown with nothing linking
+    # it to CSS, which is why this is worth a line of output. `--watch=always` is
+    # the fix.
+    TAILWIND_BARE_WATCH = /\btailwindcss\b/.freeze
+    BARE_WATCH_FLAG = /--watch(?![=\w])/.freeze
+
+    def self.stdin_sensitive_warning(command)
+      return nil unless command.match?(TAILWIND_BARE_WATCH) && command.match?(BARE_WATCH_FLAG)
+
+      "runs the tailwindcss CLI with a bare `--watch`, which exits when stdin closes. " \
+        "Under foreman that ends the whole session a moment after boot, with exit status 0. " \
+        "Use `--watch=always`."
+    end
+
     def self.unfixable_warning(_command, operators)
       tokens = operators.map { |op| op[:token] }
       # Groupings are named before separators: a pipe inside `$( )` is incidental,

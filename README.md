@@ -26,6 +26,8 @@ bin/dev
 
 The generator writes a `bin/dev` that calls Copse, and creates `Procfile.dev` only if you don't have one. An existing `Procfile.dev` is never modified; an existing `bin/dev` is copied to `bin/dev.before-copse` first.
 
+Already on [Overmind](https://github.com/DarthSim/overmind)? The generator sees it in your `bin/dev` and keeps it. Ask for either supervisor explicitly with `--process-manager=overmind` or `--process-manager=foreman`.
+
 ## Why
 
 Two apps both want port 3000, so you hand-assign `-p 3001` and then forget which app owns which number — and your teammates picked different ones. Worse, everything lands on `localhost`, so every app shares one cookie jar and one `localStorage`: signing into one signs you out of another.
@@ -93,6 +95,28 @@ gem "foreman", group: :development
 
 Teardown is verified against **0.90.0+**; older versions warn. Under a version manager gems are per-Ruby-version, so switching Ruby can make foreman vanish with no change to your code.
 
+## overmind
+
+```sh
+bin/rails generate copse:install --process-manager=overmind
+```
+
+Overmind fixes the debugger the other way: every process gets its own tmux pty, so stdin is never multiplexed and you attach with `overmind connect web`. That makes the foreground-`web` split pointless — under Overmind, Copse contributes only the environment and hands the whole `Procfile.dev` over:
+
+```ruby
+exit Copse.start(process_manager: :overmind, args: ARGV)
+```
+
+Consequences of Overmind supervising everything, `web` included:
+
+- **`PORT` is Overmind's, `base + index * 100`.** So `web` must be the **first** entry in `Procfile.dev` to get the derived port. Copse warns if it isn't. Every process still gets the derived port under `COPSE_PORT`.
+- **The derived port is passed as `-p`, and `OVERMIND_SKIP_ENV=1` is set.** Overmind applies env files *over* the environment it's handed, so a stale `PORT` in one would otherwise win. `-p` is what defeats that — including in `.overmind.env`, which `OVERMIND_SKIP_ENV` doesn't skip. Neither touches your app's own loading: `dotenv-rails` still reads `.env` inside Rails, exactly as on the foreman path.
+- `bin/dev`'s arguments go to `overmind start` *after* Copse's, so `bin/dev -l web` works and `bin/dev -p 4000` still overrides the derived port.
+- **An explicit `--port` on the `web` line wins, and Copse only warns.** `rails server` honours the flag over `PORT`. The foreman path strips it, but that's Copse building the command itself; here Overmind runs your Procfile, and rewriting it into a copy would mean the file you edit and the file `overmind restart` reloads were different things. Remove the flag.
+- No pty problems, so none of the stdin traps below apply.
+
+`bin/dev` is committed, and Overmind is a binary rather than a gem, so it's checked at run time, not generate time: a teammate without Overmind falls back to the foreman session automatically. Which is a reason to keep `foreman` in the Gemfile anyway if `Procfile.dev` has non-`web` entries — that machine will need it.
+
 ## Where `*.localhost` resolves
 
 RFC 6761 §6.3 makes `.localhost` special with a *SHOULD*, not a MUST, so support is uneven. Two separate questions: does the client resolve the name, and does it then reach a server bound to IPv4 loopback — which is what Rails binds, while `*.localhost` resolves `::1` first.
@@ -126,13 +150,14 @@ On macOS ≤ 15 or bare-glibc Linux and need Safari or `curl`? puma-dev's resolv
 
 - Ruby >= 3.2.0 (Rails 8.1's own floor; note 3.2 reached EOL 2026-04-01)
 - Rails 7.1+ for the generator and URL options — the derivation itself needs neither Rails nor git
-- `foreman` >= 0.90.0, only for apps with non-`web` Procfile entries
+- `foreman` >= 0.90.0, only for apps with non-`web` Procfile entries — or Overmind instead, on the `--process-manager=overmind` path
 
 Rails 8's development host allowlist already includes `.localhost`, so no `config.hosts` change is needed.
 
 ## Notes
 
 - `Ctrl-C` can take up to foreman's shutdown timeout (5s default) if a watcher doesn't exit promptly.
+- **Coming from Overmind, a bare `tailwindcss --watch` will take your whole session down.** The Tailwind CLI exits when stdin closes; Overmind's pty kept it open, foreman gives it none. The watcher exits **0** a second or two after boot and foreman's cascade ends `web` with it, so a CSS problem reads as an intentional shutdown. Use `--watch=always`. Copse warns when it sees the bare flag.
 - Some Procfile lines cannot be made signal-transparent, so Copse warns and leaves them exactly as written rather than rewriting them into something subtly different. Their children may survive teardown; split them into separate entries to fix it. The shapes are a **pipeline** (`a | b`), a **background `&`**, a **command substitution** (`$(...)` or backticks), and a **subshell** (`(...)`). Each keeps a shell in front of the real process, and no `exec` placement collapses that into one signalable pid — `exec (cd x && y)` is not even valid shell syntax.
 - Out of scope: reverse proxy, daemon, TLS, port registry, and `/etc/hosts` management.
 

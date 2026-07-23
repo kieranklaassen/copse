@@ -11,8 +11,19 @@ class InstallGeneratorTest < Minitest::Test
     FileUtils.mkdir_p(File.join(@root, "bin"))
   end
 
-  def run_generator
-    Copse::Generators::InstallGenerator.start(["--quiet"], destination_root: @root)
+  def run_generator(*args)
+    Copse::Generators::InstallGenerator.start(["--quiet", *args], destination_root: @root)
+  end
+
+  # --quiet mutes the shell entirely, so the closing advice has to be read from an
+  # unmuted run.
+  def capture_say(*args)
+    previous = $stdout
+    $stdout = StringIO.new
+    Copse::Generators::InstallGenerator.start(args, destination_root: @root)
+    $stdout.string
+  ensure
+    $stdout = previous
   end
 
   def read(relative) = File.read(File.join(@root, relative))
@@ -50,6 +61,130 @@ class InstallGeneratorTest < Minitest::Test
     assert_includes read("bin/dev"), "Copse.start"
     assert exists?("bin/dev.before-copse"), "the app's own bin/dev was destroyed with no copy"
     assert_equal original, read("bin/dev.before-copse")
+  end
+
+  # --- Process manager -----------------------------------------------------
+
+  def test_bin_dev_drives_foreman_by_default
+    run_generator
+
+    assert_equal "exit Copse.start\n", read("bin/dev").lines.last
+  end
+
+  def test_the_overmind_flag_writes_an_overmind_bin_dev
+    run_generator("--process-manager=overmind")
+
+    assert_includes read("bin/dev"), "Copse.start(process_manager: :overmind, args: ARGV)"
+  end
+
+  def test_an_existing_overmind_bin_dev_is_not_downgraded_to_foreman
+    # The reported bug: the generator force-overwrote a working overmind bin/dev
+    # with one that dropped back to foreman, losing `overmind connect`.
+    File.write(File.join(@root, "bin/dev"), <<~SH)
+      #!/bin/sh
+      exec overmind start -f Procfile.dev
+    SH
+
+    run_generator
+
+    assert_includes read("bin/dev"), "process_manager: :overmind"
+    assert_equal "#!/bin/sh\nexec overmind start -f Procfile.dev\n", read("bin/dev.before-copse")
+  end
+
+  def test_the_word_overmind_in_a_comment_does_not_flip_the_supervisor
+    # Detection must find a bin/dev that *runs* overmind, not one that mentions it.
+    File.write(File.join(@root, "bin/dev"), <<~SH)
+      #!/bin/sh
+      # We used to run overmind here.
+      exec foreman start -f Procfile.dev
+    SH
+
+    run_generator
+
+    refute_includes read("bin/dev"), "overmind"
+  end
+
+  def test_the_overmind_start_alias_is_detected
+    File.write(File.join(@root, "bin/dev"), "#!/bin/sh\nexec overmind s -f Procfile.dev\n")
+
+    run_generator
+
+    assert_includes read("bin/dev"), "process_manager: :overmind"
+  end
+
+  def test_an_explicit_foreman_flag_beats_detection
+    File.write(File.join(@root, "bin/dev"), "#!/bin/sh\nexec overmind start -f Procfile.dev\n")
+
+    run_generator("--process-manager=foreman")
+
+    refute_includes read("bin/dev"), "overmind"
+  end
+
+  def test_switching_process_manager_rewrites_an_already_wired_bin_dev
+    run_generator
+    run_generator("--process-manager=overmind")
+
+    assert_includes read("bin/dev"), "process_manager: :overmind"
+    refute exists?("bin/dev.before-copse"), "a Copse bin/dev holds nothing to back up"
+
+    run_generator("--process-manager=foreman")
+
+    refute_includes read("bin/dev"), "overmind"
+  end
+
+  def test_an_overmind_bin_dev_survives_a_second_run
+    run_generator("--process-manager=overmind")
+    first = read("bin/dev")
+
+    run_generator("--process-manager=overmind")
+    assert_equal first, read("bin/dev")
+
+    # And with no flag at all: detection reads the bin/dev it just wrote.
+    run_generator
+    assert_equal first, read("bin/dev")
+  end
+
+  def test_an_unknown_process_manager_is_refused_before_anything_is_written
+    previous = $stderr
+    $stderr = StringIO.new
+    begin
+      run_generator("--process-manager=hivemind")
+      message = $stderr.string
+    ensure
+      $stderr = previous
+    end
+
+    assert_includes message, "foreman"
+    assert_includes message, "overmind"
+    refute exists?("bin/dev"), "a refused run still wrote bin/dev"
+  end
+
+  def test_the_overmind_path_still_names_foreman_for_the_fallback
+    # The overmind bin/dev falls back to the foreman session on a machine without
+    # overmind, and these entries need foreman there.
+    File.write(File.join(@root, "Procfile.dev"), "web: bin/rails server\ncss: bin/watch\n")
+
+    said = capture_say("--process-manager=overmind")
+
+    assert_includes said, "overmind connect web"
+    assert_includes said, "foreman"
+  end
+
+  def test_the_overmind_path_asks_for_no_foreman_with_nothing_to_supervise
+    # A web-only Procfile needs no foreman on either path, so the fallback is still
+    # named but nothing is asked for.
+    said = capture_say("--process-manager=overmind")
+
+    assert_includes said, "falls back to the foreman session"
+    refute_includes said, "gem \"foreman\""
+  end
+
+  def test_the_generated_overmind_bin_dev_is_valid_ruby
+    run_generator("--process-manager=overmind")
+
+    _out, err, status = Open3.capture3(RbConfig.ruby, "-c", File.join(@root, "bin/dev"))
+
+    assert_predicate status, :success?, err
   end
 
   # --- Procfile.dev (R10, AE4) --------------------------------------------

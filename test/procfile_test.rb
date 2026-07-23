@@ -253,6 +253,29 @@ class ProcfileTest < Minitest::Test
     assert_includes warning, "background"
   end
 
+  # --- The bare `--watch` trap ---------------------------------------------
+
+  def test_a_bare_tailwind_watch_is_warned_about
+    # Measured: under foreman the watcher exits 0 seconds after boot and takes the
+    # whole session with it, with nothing in the output naming CSS.
+    warning = Copse::Procfile.stdin_sensitive_warning(
+      "tailwindcss -i app/assets/stylesheets/application.css -o app/assets/builds/application.css --watch"
+    )
+
+    refute_nil warning
+    assert_includes warning, "--watch=always"
+  end
+
+  def test_watch_always_is_not_warned_about
+    assert_nil Copse::Procfile.stdin_sensitive_warning("tailwindcss -i a.css -o b.css --watch=always")
+  end
+
+  def test_a_non_tailwind_watcher_is_not_warned_about
+    # Only the Tailwind CLI's stdin behaviour was measured; nothing else is guessed at.
+    assert_nil Copse::Procfile.stdin_sensitive_warning("yarn build --watch")
+    assert_nil Copse::Procfile.stdin_sensitive_warning("bin/rails tailwindcss:watch")
+  end
+
   def test_operator_scan_ignores_quoted_and_escaped_operators
     assert_empty Copse::Procfile.top_level_operators("a 'b;c' d")
     assert_empty Copse::Procfile.top_level_operators(%(a "b|c" d))

@@ -242,7 +242,85 @@ module Copse
     def procfile
       return @procfile if defined?(@procfile)
 
-      @procfile = Procfile.load(File.join(root, "Procfile.dev"))
+      @procfile = Procfile.load(procfile_path)
+    end
+
+    def procfile_path = File.join(root, "Procfile.dev")
+
+    # Hands the whole Procfile -- `web` included -- to Overmind, replacing this
+    # process. Never returns.
+    #
+    # There is no split session here and no foreground/background distinction to
+    # preserve: Overmind gives every process its own tmux pty, so `binding.irb`
+    # works over `overmind connect web` rather than by holding this terminal. All
+    # Copse contributes on this path is the environment.
+    #
+    # The environment is `copse_env` unoffset -- deliberately not
+    # `foreman_port_env`. Overmind derives each child's port as
+    # `base + index * 100` from PORT just as foreman does, but here it supervises
+    # `web` too, so offsetting the base would hand `web` a port Copse never
+    # derived and the banner above would name the wrong URL.
+    # `-p` before the caller's own arguments, so `bin/dev -p 4000` still wins.
+    #
+    # The base port is passed as a *flag* rather than left to the inherited PORT
+    # because only the flag survives Overmind's env files. Measured against
+    # Overmind 2.5.1: with `PORT` in `.overmind.env` and the derived port merely
+    # inherited, the app booted on the env file's port; with `-p` it booted on the
+    # derived one. Secondaries still get `base + index * 100`.
+    def exec_overmind(args = [])
+      @out.puts "=> Copse: #{worktree.url}"
+      @out.puts overmind_web_position_warning if web_out_of_position?
+      @out.puts overmind_port_flag_warning if web_port_flag?
+      exec(overmind_env, "overmind", "start", "-f", procfile_path, "-p", worktree.port.to_s, *args)
+    end
+
+    # An explicit `--port` on the `web` line beats PORT in `rails server`, and
+    # vite_ruby's own example ships one. The foreman path strips it, but only
+    # because Copse builds that command itself; here Overmind runs the app's own
+    # Procfile, and rewriting it into a temp copy would mean `overmind restart` and
+    # the file the developer edits were no longer the same thing. So this is a
+    # warning, the same call the signal-transparency transform makes for shapes it
+    # will not rewrite.
+    def web_port_flag?
+      entry = procfile&.web
+      !entry.nil? && Procfile.port_flag?(entry.command)
+    end
+
+    def overmind_port_flag_warning
+      "copse: the `web` line in Procfile.dev sets an explicit port, which beats the derived " \
+        "#{worktree.port} -- so the app will not be at #{worktree.url}. Remove the flag."
+    end
+
+    # OVERMIND_SKIP_ENV is this path's `--env /dev/null`, and for the same reason:
+    # Overmind loads the app's `.env` and applies it *over* the environment it was
+    # handed, so anything Copse derives is otherwise beatable by a stale `.env`.
+    #
+    # It is not the port's only defence -- `-p` above is, and it covers
+    # `.overmind.env`, which this flag does not skip. What this buys is that both
+    # supervisors see the same environment. That matters more here than it looks:
+    # the overmind `bin/dev` falls back to the foreman session on a machine without
+    # overmind, so if the two disagreed about `.env`, one committed repo would
+    # behave differently per teammate.
+    #
+    # Only the supervisor's env-file loading is suppressed, not the app's.
+    # dotenv-rails still reads `.env` inside Rails, exactly as on the foreman path.
+    def overmind_env
+      copse_env.merge("OVERMIND_SKIP_ENV" => "1")
+    end
+
+    # Whether `overmind start` will actually work. Overmind is a Go binary rather
+    # than a gem, so unlike foreman there is no bundler environment to strip and no
+    # version-manager shim to see past -- but probing still beats `command -v`,
+    # which succeeds on an unexecutable file.
+    #
+    # `--version`, not `version`: Overmind has no `version` subcommand and exits 3
+    # on one, which would make every probe fail and silently downgrade the whole
+    # path to foreman.
+    def overmind_available?
+      _out, _err, status = Open3.capture3("overmind", "--version")
+      status.success?
+    rescue Errno::ENOENT, Errno::EACCES
+      false
     end
 
     # The variables every process Copse starts receives.
@@ -353,6 +431,22 @@ module Copse
       secondaries.any?
     end
 
+    # Only Overmind cares: it hands `web` the port at its Procfile index, so a
+    # `web` line that is not first gets `port + index * 100`. On the foreman path
+    # Copse spawns `web` itself with the derived PORT, so its position is
+    # irrelevant.
+    def web_out_of_position?
+      entry = procfile&.web
+      !entry.nil? && procfile.entries.first != entry
+    end
+
+    def overmind_web_position_warning
+      index = procfile.entries.index(procfile.web)
+      "copse: `web` is entry #{index + 1} in Procfile.dev, so overmind will start it on " \
+        "#{worktree.port + index * 100} rather than the derived port #{worktree.port} " \
+        "(each process gets base + index * 100). Move `web` to the top of Procfile.dev."
+    end
+
     # Writes the secondaries to a Procfile foreman can run, inside a private
     # directory. The file's contents are commands foreman will execute, and
     # derived hostnames are deliberately reproducible, so a predictable path in a
@@ -370,6 +464,8 @@ module Copse
       lines = secondaries.map do |entry|
         command, warning = Procfile.signal_transparent(entry.command)
         @out.puts "copse: `#{entry.name}` #{warning}" if warning
+        stdin_warning = Procfile.stdin_sensitive_warning(entry.command)
+        @out.puts "copse: `#{entry.name}` #{stdin_warning}" if stdin_warning
         "#{entry.name}: #{command}\n"
       end
 
