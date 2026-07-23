@@ -260,22 +260,32 @@ module Copse
     # `base + index * 100` from PORT just as foreman does, but here it supervises
     # `web` too, so offsetting the base would hand `web` a port Copse never
     # derived and the banner above would name the wrong URL.
+    # `-p` before the caller's own arguments, so `bin/dev -p 4000` still wins.
+    #
+    # The base port is passed as a *flag* rather than left to the inherited PORT
+    # because only the flag survives Overmind's env files. Measured against
+    # Overmind 2.5.1: with `PORT` in `.overmind.env` and the derived port merely
+    # inherited, the app booted on the env file's port; with `-p` it booted on the
+    # derived one. Secondaries still get `base + index * 100`.
     def exec_overmind(args = [])
       @out.puts "=> Copse: #{worktree.url}"
       @out.puts overmind_web_position_warning if web_out_of_position?
-      exec(overmind_env, "overmind", "start", "-f", procfile_path, *args)
+      exec(overmind_env, "overmind", "start", "-f", procfile_path, "-p", worktree.port.to_s, *args)
     end
 
-    # OVERMIND_SKIP_ENV is this path's `--env /dev/null`, and for the same reason.
+    # OVERMIND_SKIP_ENV is this path's `--env /dev/null`, and for the same reason:
+    # Overmind loads the app's `.env` and applies it *over* the environment it was
+    # handed, so anything Copse derives is otherwise beatable by a stale `.env`.
     #
-    # Overmind loads the app's `.env` itself and applies it *over* the environment
-    # it was handed, so a `PORT` in `.env` -- measured against Overmind 2.5.1 --
-    # silently beats the derived one: the app binds a port Copse never derived while
-    # the banner and COPSE_PORT name the one it did.
+    # It is not the port's only defence -- `-p` above is, and it covers
+    # `.overmind.env`, which this flag does not skip. What this buys is that both
+    # supervisors see the same environment. That matters more here than it looks:
+    # the overmind `bin/dev` falls back to the foreman session on a machine without
+    # overmind, so if the two disagreed about `.env`, one committed repo would
+    # behave differently per teammate.
     #
-    # This suppresses only the supervisor's env-file loading, not the app's.
-    # dotenv-rails still reads `.env` inside Rails, exactly as it does on the
-    # foreman path.
+    # Only the supervisor's env-file loading is suppressed, not the app's.
+    # dotenv-rails still reads `.env` inside Rails, exactly as on the foreman path.
     def overmind_env
       copse_env.merge("OVERMIND_SKIP_ENV" => "1")
     end

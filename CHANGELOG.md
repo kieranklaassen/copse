@@ -27,8 +27,8 @@ First release.
   keeps the debugger working. An app whose `bin/dev` already drives Overmind gets
   that variant by default rather than being downgraded to foreman. Overmind is
   probed at run time, so a teammate without it falls back to the foreman session.
-  `OVERMIND_SKIP_ENV=1` is set on that path so a `PORT` in `.env` cannot beat the
-  derived one, the same reason foreman is given `--env /dev/null`.
+  The derived port is passed to Overmind as `-p` and `OVERMIND_SKIP_ENV=1` is set,
+  so no env file can beat it — the same reason foreman is given `--env /dev/null`.
 - Warns when a Procfile entry runs the Tailwind CLI with a bare `--watch`, which
   exits when stdin closes and so ends the whole foreman session with status 0.
 

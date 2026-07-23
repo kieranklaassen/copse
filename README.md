@@ -110,8 +110,8 @@ exit Copse.start(process_manager: :overmind, args: ARGV)
 Consequences of Overmind supervising everything, `web` included:
 
 - **`PORT` is Overmind's, `base + index * 100`.** So `web` must be the **first** entry in `Procfile.dev` to get the derived port. Copse warns if it isn't. Every process still gets the derived port under `COPSE_PORT`.
-- **`OVERMIND_SKIP_ENV=1` is set.** Overmind applies your `.env` *over* the environment it's handed, so a `PORT` there would silently beat the derived one. This suppresses Overmind's env-file loading, not your app's — `dotenv-rails` still reads `.env` inside Rails, exactly as on the foreman path.
-- `bin/dev`'s arguments go to `overmind start`, so `bin/dev -l web` works.
+- **The derived port is passed as `-p`, and `OVERMIND_SKIP_ENV=1` is set.** Overmind applies env files *over* the environment it's handed, so a stale `PORT` in one would otherwise win. `-p` is what defeats that — including in `.overmind.env`, which `OVERMIND_SKIP_ENV` doesn't skip. Neither touches your app's own loading: `dotenv-rails` still reads `.env` inside Rails, exactly as on the foreman path.
+- `bin/dev`'s arguments go to `overmind start` *after* Copse's, so `bin/dev -l web` works and `bin/dev -p 4000` still overrides the derived port.
 - No pty problems, so none of the stdin traps below apply.
 
 `bin/dev` is committed, and Overmind is a binary rather than a gem, so it's checked at run time, not generate time: a teammate without Overmind falls back to the foreman session automatically. Which is a reason to keep `foreman` in the Gemfile anyway if `Procfile.dev` has non-`web` entries — that machine will need it.

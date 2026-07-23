@@ -41,8 +41,18 @@ class OvermindTest < Minitest::Test
 
     s.exec_overmind(["-l", "web"])
 
-    assert_equal ["overmind", "start", "-f", File.join(@root, "Procfile.dev"), "-l", "web"],
+    assert_equal ["overmind", "start", "-f", File.join(@root, "Procfile.dev"), "-p", "5368",
+                  "-l", "web"],
                  s.exec_argv
+  end
+
+  def test_the_callers_own_port_flag_still_wins
+    # Ours comes first, so a later -p from the command line overrides it.
+    s = session("web: bin/rails server\n")
+
+    s.exec_overmind(["-p", "4000"])
+
+    assert_equal %w[-p 5368 -p 4000], s.exec_argv.last(4)
   end
 
   def test_the_derived_port_reaches_overmind_unoffset
@@ -132,7 +142,7 @@ class OvermindTest < Minitest::Test
 
     out = run_start(path: fake_overmind, args: %w[-l web])
 
-    assert_includes out, "overmind-argv: start -f #{File.join(@root, 'Procfile.dev')} -l web"
+    assert_includes out, "overmind-argv: start -f #{File.join(@root, 'Procfile.dev')} -p #{port} -l web"
     assert_includes out, "overmind-port: #{port}"
   end
 
@@ -166,17 +176,23 @@ class OvermindTest < Minitest::Test
     refute_predicate status, :success?
   end
 
-  def test_a_port_in_dot_env_does_not_beat_the_derived_port
-    skip "overmind and tmux are not both installed" unless real_overmind? && tmux?
+  def test_a_port_in_an_env_file_does_not_beat_the_derived_port
+    # Both files, because they are defeated by different things: OVERMIND_SKIP_ENV
+    # covers `.env` and does nothing for `.overmind.env`, which only `-p` covers.
+    [".env", ".overmind.env"].each do |name|
+      skip "overmind and tmux are not both installed" unless real_overmind? && tmux?
 
-    File.write(File.join(@root, ".env"), "PORT=9999\n")
-    File.write(File.join(@root, "Procfile.dev"), %(web: sh -c "echo web-port=$PORT"\n))
-    port = Copse::Worktree.new(@root).port
+      File.write(File.join(@root, name), "PORT=9999\n")
+      File.write(File.join(@root, "Procfile.dev"), %(web: sh -c "echo web-port=$PORT"\n))
+      port = Copse::Worktree.new(@root).port
 
-    out = run_start(path: ENV.fetch("PATH"))
+      out = run_start(path: ENV.fetch("PATH"))
 
-    assert_includes out, "web-port=#{port}"
-    refute_includes out, "web-port=9999"
+      assert_includes out, "web-port=#{port}", "#{name} beat the derived port"
+      refute_includes out, "web-port=9999", "#{name} beat the derived port"
+    ensure
+      FileUtils.rm_f(File.join(@root, name))
+    end
   end
 
   def test_start_falls_back_to_the_foreman_session_when_overmind_is_missing
