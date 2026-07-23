@@ -20,8 +20,20 @@ class RailtieTest < Minitest::Test
   #
   # `preset` runs before initialize!, so a scenario can simulate an app that sets
   # its own URL options.
-  def boot(env:, rails_env: "development", preset: nil, load_mailer: true)
+  # `database_yml` opts the child into Active Record, with that YAML as the app's
+  # config/database.yml. `app_root` is where that app lives, which for the
+  # database scenarios is a real git checkout -- the rename is derived from the
+  # checkout on disk and from nothing else, so faking it through the environment
+  # would prove nothing.
+  def boot(env:, rails_env: "development", preset: nil, load_mailer: true, database_yml: nil,
+           app_root: nil)
     reader, writer = IO.pipe
+    root = app_root || __dir__
+
+    if database_yml
+      FileUtils.mkdir_p(File.join(root, "config"))
+      File.write(File.join(root, "config", "database.yml"), database_yml)
+    end
 
     pid = fork do
       reader.close
@@ -34,12 +46,25 @@ class RailtieTest < Minitest::Test
       require "rails"
       require "action_controller/railtie"
       require "action_mailer/railtie" if load_mailer
+      require "active_record/railtie" if database_yml
       # copse itself was required without Rails present, so the railtie was
       # skipped. Load it explicitly now that Rails::Railtie exists.
       require "copse/railtie"
 
+      # A stand-in adapter, so a full boot can be observed without a database gem
+      # or a running server. Active Record resolves the adapter class while
+      # establishing the connection -- an unregistered or absent one is fatal
+      # there -- but never instantiates it, because connecting is lazy.
+      if database_yml
+        ActiveRecord::ConnectionAdapters.register(
+          "copse_probe",
+          "ActiveRecord::ConnectionAdapters::AbstractAdapter",
+          "active_record/connection_adapters/abstract_adapter"
+        )
+      end
+
       app = Class.new(Rails::Application) do
-        config.root = __dir__
+        config.root = root
         config.eager_load = false
         config.logger = Logger.new(IO::NULL)
         config.secret_key_base = "copse-test-secret"
@@ -50,6 +75,15 @@ class RailtieTest < Minitest::Test
       instance_eval(&preset) if preset
 
       app.initialize!
+
+      databases =
+        if database_yml
+          ActiveRecord::Base.configurations
+                            .configs_for(env_name: rails_env, include_hidden: true)
+                            .to_h { |config| [config.name, config.database] }
+        else
+          {}
+        end
 
       mailer =
         if load_mailer
@@ -65,6 +99,12 @@ class RailtieTest < Minitest::Test
       writer.puts JSON.dump(
         routes: Rails.application.routes.default_url_options,
         mailer: mailer,
+        databases: databases,
+        # What the connection pool would actually connect to, which is the claim
+        # that matters: Active Record establishes the connection before Copse
+        # renames anything, so the rename has to reach the pool that already
+        # exists.
+        pool_database: database_yml ? ActiveRecord::Base.connection_pool.db_config.database : nil,
         stdout: File.exist?(log) ? File.read(log) : ""
       )
       writer.close
@@ -145,6 +185,73 @@ class RailtieTest < Minitest::Test
     assert_equal "cora.localhost", result.dig(:routes, :host)
     # ... but the mailer keeps what the app chose.
     assert_equal "mail.example.com", result.dig(:mailer, :host)
+  end
+
+  DATABASE_YML = <<~YAML
+    development:
+      primary:
+        adapter: copse_probe
+        database: cora_development
+      queue:
+        adapter: copse_probe
+        database: cora_queue_development
+    production:
+      adapter: copse_probe
+      database: cora_production
+  YAML
+
+  def test_a_linked_worktree_gets_its_own_development_databases
+    skip "ActiveRecord::ConnectionAdapters.register needs Rails 7.2+" unless adapter_registry?
+
+    result = with_git_repo(name: "cora") do |repo|
+      with_linked_worktree(repo, "fix-billing") { |linked| boot_with_database(app_root: linked) }
+    end
+
+    assert_nil result[:error], result[:error]
+    assert_equal "cora_development_fix_billing", result.dig(:databases, :primary)
+    assert_equal "cora_queue_development_fix_billing", result.dig(:databases, :queue)
+    # The rename reached the pool Active Record had already established.
+    assert_equal "cora_development_fix_billing", result[:pool_database]
+    assert_includes result[:stdout].to_s, "cora_development_fix_billing"
+  end
+
+  def test_a_main_worktree_keeps_the_database_the_app_already_has
+    skip "ActiveRecord::ConnectionAdapters.register needs Rails 7.2+" unless adapter_registry?
+
+    # A stale COPSE_DATABASE_SUFFIX is the case this pins: it outlives the session
+    # that set it (a shell opened from a linked worktree's `bin/dev`, a leftover
+    # line in `.env`), and the app's own checkout has to win anyway.
+    result = with_git_repo(name: "cora") do |repo|
+      boot_with_database(app_root: repo, env: { "COPSE_DATABASE_SUFFIX" => "fix_billing" })
+    end
+
+    assert_nil result[:error], result[:error]
+    assert_equal "cora_development", result.dig(:databases, :primary)
+    refute_includes result[:stdout].to_s, "database cora"
+  end
+
+  def test_a_non_development_environment_keeps_its_database
+    skip "ActiveRecord::ConnectionAdapters.register needs Rails 7.2+" unless adapter_registry?
+
+    result = with_git_repo(name: "cora") do |repo|
+      with_linked_worktree(repo, "fix-billing") do |linked|
+        boot_with_database(app_root: linked, rails_env: "production")
+      end
+    end
+
+    assert_nil result[:error], result[:error]
+    assert_equal "cora_production", result.dig(:databases, :primary)
+  end
+
+  def boot_with_database(app_root:, env: {}, rails_env: "development")
+    boot(env: COPSE_ENV.merge(env), rails_env: rails_env, database_yml: DATABASE_YML,
+         app_root: app_root)
+  end
+
+  def adapter_registry?
+    require "active_record"
+
+    ActiveRecord::ConnectionAdapters.respond_to?(:register)
   end
 
   def test_an_app_without_action_mailer_boots_without_a_no_method_error

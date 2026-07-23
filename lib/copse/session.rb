@@ -337,13 +337,20 @@ module Copse
     # COPSE_PORT exists because foreman rewrites PORT for its own children
     # (base_port + index * 100), so a secondary never sees the derived port under
     # the name PORT. COPSE_PORT is the name foreman does not touch.
+    # COPSE_DATABASE_SUFFIX is nil in a main worktree, which keeps its plain
+    # database name. Nil rather than a missing key on purpose: Process.spawn merges
+    # its env hash into the inherited one, so leaving the key out would let a stale
+    # value inherited from elsewhere -- a shell opened from a linked worktree's
+    # session -- reach a main worktree's children and be believed. Nil is the only
+    # way to say "unset this".
     def copse_env
       {
         "PORT" => worktree.port.to_s,
         "COPSE_PORT" => worktree.port.to_s,
         "COPSE_HOST" => worktree.host,
         "COPSE_URL" => worktree.url,
-        "VITE_RUBY_PORT" => worktree.companion_port.to_s
+        "VITE_RUBY_PORT" => worktree.companion_port.to_s,
+        "COPSE_DATABASE_SUFFIX" => worktree.database_suffix
       }
     end
 

@@ -10,6 +10,8 @@ A hostname and a port for every Rails app and every git worktree — while the d
 
 Derived from the directory name and the branch, so nothing collides and nothing has to be chosen. No daemon, no reverse proxy, no privileged listener, zero runtime dependencies.
 
+A linked worktree gets its own development database from the same derivation — `cora_development_fix_billing`. See [Databases](#databases).
+
 ## Installation
 
 ```ruby
@@ -78,12 +80,42 @@ Changing the range or the reserved list would move nearly every derived port, so
 | `COPSE_PORT` | the derived port |
 | `PORT` | the derived port — **`web` process only** |
 | `VITE_RUBY_PORT` | the derived companion port |
+| `COPSE_DATABASE_SUFFIX` | `fix_billing` — **linked worktrees only**, actively unset in a main one |
+
+`COPSE_DATABASE_SUFFIX` is exported for your processes to read; Copse never reads it back. In a main worktree it's *removed* from the child environment rather than merely left unset, so a copy inherited from another worktree's session can't be believed. And the rename below is derived from the checkout on disk, so no stale copy of this variable — a shell opened from a linked worktree, a leftover line in `.env` — can rename a main worktree's database.
 
 **In a non-`web` process, read `COPSE_PORT`, not `PORT`.** Foreman assigns its children `base_port + index * 100`, so a secondary's `PORT` is a number Copse never derived. Copse deliberately hands foreman an offset base, so no secondary is ever given the `web` process's own port.
 
 In development Copse also sets `default_url_options` for routes and Action Mailer. It stays out of the way otherwise: not in other environments, not under a plain `bin/rails server`, and not when your app set its own `host`. Puma still prints `Listening on http://127.0.0.1:5368` — that's the address it bound; Copse's line is the name to visit.
 
 `VITE_RUBY_PORT` is picked up by `vite_ruby` automatically. Vite is the only bundler that needs it: esbuild via `jsbundling-rails`, `cssbundling-rails`, `tailwindcss-rails`, Propshaft, and importmap have no port at all.
+
+## Databases
+
+A hostname and a port keep two worktrees from colliding in the browser; they still share one schema. So in **development**, a linked worktree also gets its own database — named after the same slug the hostname uses, with `_` instead of `-`:
+
+```
+~/code/cora             on main         →  cora_development
+~/code/cora-fix-billing on fix-billing  →  cora_development_fix_billing
+```
+
+**A main worktree keeps the database it already has**, which is what makes this safe to add to an existing app: the database you've been using never moves. `config/database.yml` is not modified — Copse renames the loaded configuration at boot.
+
+Copse doesn't create it. Rails already tells you when a database is missing, and creating one is not something `bin/dev` should do behind your back:
+
+```sh
+bin/rails db:prepare
+```
+
+That works because the rename is derived from the checkout on disk, not from the environment `bin/dev` exports — so `db:prepare`, `bin/rails console`, and `bin/dev` all reach the same database, whether or not Copse started them.
+
+What is left alone:
+
+- **Every environment but development.** Production has one checkout, and Rails already partitions the test database per parallel worker.
+- **SQLite and any other file-backed database.** A linked worktree is its own directory, so `storage/development.sqlite3` is already a separate database; renaming would only move the file.
+- **Databases marked `database_tasks: false`** — that's how an app says Rails doesn't own it. Replicas *are* renamed, since they point at the same database as their primary.
+
+Every development entry in a multi-database `database.yml` is renamed, not just `primary`. Names are capped at 63 bytes (PostgreSQL truncates past that with only a notice, MySQL rejects past 64); the suffix is what gets trimmed, so two very long branch names can share a database the same way they can share a hostname.
 
 ## foreman
 

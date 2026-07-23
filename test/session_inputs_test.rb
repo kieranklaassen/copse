@@ -5,7 +5,8 @@ require "test_helper"
 # The spawn-free half of Session: environment assembly, the temporary Procfile,
 # and the foreman probe. The lifecycle is exercised in session_lifecycle_test.rb.
 class SessionInputsTest < Minitest::Test
-  FakeWorktree = Struct.new(:root, :host, :port, :companion_port, keyword_init: true) do
+  FakeWorktree = Struct.new(:root, :host, :port, :companion_port, :database_suffix,
+                            keyword_init: true) do
     def url = "http://#{host}:#{port}"
   end
 
@@ -31,6 +32,30 @@ class SessionInputsTest < Minitest::Test
     assert_equal "cora.localhost", env["COPSE_HOST"]
     assert_equal "http://cora.localhost:5368", env["COPSE_URL"]
     assert_equal "9911", env["VITE_RUBY_PORT"]
+  end
+
+  def test_exports_the_database_suffix_in_a_linked_worktree
+    @worktree.database_suffix = "fix_billing"
+
+    assert_equal "fix_billing", session.copse_env["COPSE_DATABASE_SUFFIX"]
+  end
+
+  def test_unsets_the_database_suffix_in_a_main_worktree
+    # A main worktree keeps its plain database name, so its children must not see a
+    # suffix -- including one inherited from a shell opened inside some other
+    # worktree's session. Proven on a real child process, because Process.spawn
+    # merges its env hash rather than replacing the environment: omitting the key
+    # would leave the inherited value in place, and only nil removes it.
+    ENV["COPSE_DATABASE_SUFFIX"] = "stale_from_another_worktree"
+
+    out, _err, status = Open3.capture3(
+      session.copse_env, "ruby", "-e", "puts ENV.fetch('COPSE_DATABASE_SUFFIX', 'ABSENT')"
+    )
+
+    assert_predicate status, :success?
+    assert_equal "ABSENT", out.strip
+  ensure
+    ENV.delete("COPSE_DATABASE_SUFFIX")
   end
 
   def test_copse_port_duplicates_port_because_foreman_rewrites_port

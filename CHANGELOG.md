@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Gives a linked worktree its own development database, derived from the same slug
+  as the hostname: `cora_development` becomes `cora_development_fix_billing`. A
+  main worktree keeps the database it already has, and `config/database.yml` is
+  never modified — the loaded configuration is renamed at boot. Development only;
+  file-backed databases (SQLite) and entries marked `database_tasks: false` are
+  left alone, replicas follow their primary, and names are capped at 63 bytes.
+  Copse does not create the database: run `bin/rails db:prepare`. The suffix is
+  derived from the checkout on disk rather than from Copse's own environment, so
+  `db:prepare` and `bin/rails console` reach the same database as `bin/dev`, and
+  a stale `COPSE_DATABASE_SUFFIX` cannot rename a main worktree's database.
+- Exports `COPSE_DATABASE_SUFFIX` in a linked worktree, for other processes to
+  read; Copse never reads it back. In a main worktree it is removed from the child
+  environment, so a stale value inherited from another worktree's session cannot
+  be believed there either.
+
 ## 0.1.0 (2026-07-23)
 
 First release.

@@ -6,7 +6,8 @@ require "open3"
 # The Overmind path: Copse contributes the environment and nothing else, because
 # Overmind gives every process its own pty and therefore needs no split session.
 class OvermindTest < Minitest::Test
-  FakeWorktree = Struct.new(:root, :host, :port, :companion_port, keyword_init: true) do
+  FakeWorktree = Struct.new(:root, :host, :port, :companion_port, :database_suffix,
+                            keyword_init: true) do
     def url = "http://#{host}:#{port}"
   end
 
