@@ -271,6 +271,15 @@ module Copse
       @out.puts "=> Copse: #{worktree.url}"
       @out.puts overmind_web_position_warning if web_out_of_position?
       @out.puts overmind_port_flag_warning if web_port_flag?
+
+      # Matches the `chdir: root` both foreman and the foreground web spawn use, but
+      # for a different reason. The processes themselves are fine either way --
+      # Overmind takes their working directory from the Procfile's own directory, so
+      # `bin/rails server` resolves even when invoked from elsewhere. The *socket* is
+      # not: `.overmind.sock` is created relative to Overmind's own cwd, and
+      # `overmind connect web` from the app root then dials a path that does not
+      # exist.
+      Dir.chdir(root)
       exec(overmind_env, "overmind", "start", "-f", procfile_path, "-p", worktree.port.to_s, *args)
     end
 
