@@ -337,14 +337,18 @@ module Copse
     # COPSE_PORT exists because foreman rewrites PORT for its own children
     # (base_port + index * 100), so a secondary never sees the derived port under
     # the name PORT. COPSE_PORT is the name foreman does not touch.
+    # COPSE_DATABASE_SUFFIX is absent rather than empty in a main worktree, which
+    # keeps its plain database name -- `.compact` is what makes "absent" the
+    # signal, since Process.spawn reads a nil value as "unset this variable".
     def copse_env
       {
         "PORT" => worktree.port.to_s,
         "COPSE_PORT" => worktree.port.to_s,
         "COPSE_HOST" => worktree.host,
         "COPSE_URL" => worktree.url,
-        "VITE_RUBY_PORT" => worktree.companion_port.to_s
-      }
+        "VITE_RUBY_PORT" => worktree.companion_port.to_s,
+        "COPSE_DATABASE_SUFFIX" => worktree.database_suffix
+      }.compact
     end
 
     # The foreground process keeps the inherited bundler environment: it *is* the

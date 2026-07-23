@@ -5,7 +5,8 @@ require "test_helper"
 # The spawn-free half of Session: environment assembly, the temporary Procfile,
 # and the foreman probe. The lifecycle is exercised in session_lifecycle_test.rb.
 class SessionInputsTest < Minitest::Test
-  FakeWorktree = Struct.new(:root, :host, :port, :companion_port, keyword_init: true) do
+  FakeWorktree = Struct.new(:root, :host, :port, :companion_port, :database_suffix,
+                            keyword_init: true) do
     def url = "http://#{host}:#{port}"
   end
 
@@ -31,6 +32,18 @@ class SessionInputsTest < Minitest::Test
     assert_equal "cora.localhost", env["COPSE_HOST"]
     assert_equal "http://cora.localhost:5368", env["COPSE_URL"]
     assert_equal "9911", env["VITE_RUBY_PORT"]
+  end
+
+  def test_exports_the_database_suffix_in_a_linked_worktree
+    @worktree.database_suffix = "fix_billing"
+
+    assert_equal "fix_billing", session.copse_env["COPSE_DATABASE_SUFFIX"]
+  end
+
+  def test_omits_the_database_suffix_in_a_main_worktree
+    # Absent rather than empty: a main worktree keeps its plain database name, and
+    # Process.spawn reads a nil value as "unset this variable".
+    refute_includes session.copse_env, "COPSE_DATABASE_SUFFIX"
   end
 
   def test_copse_port_duplicates_port_because_foreman_rewrites_port

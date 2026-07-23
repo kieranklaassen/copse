@@ -61,6 +61,7 @@ jobs:
           for required in \
             lib/copse.rb \
             lib/copse/version.rb \
+            lib/copse/database.rb \
             lib/copse/procfile.rb \
             lib/copse/railtie.rb \
             lib/copse/session.rb \

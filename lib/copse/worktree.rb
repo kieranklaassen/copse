@@ -35,6 +35,16 @@ module Copse
       "http://#{host}:#{port}"
     end
 
+    # What a linked worktree's development database name is suffixed with, or nil
+    # in a main worktree -- which keeps the app's plain database.
+    #
+    # The same slug the hostname uses, with `-` swapped for `_`: a hyphen is
+    # legal in a database name but has to be quoted on every `psql` and `mysql`
+    # command line, and `_` is what Rails' own `<app>_development` already uses.
+    def database_suffix
+      slug&.tr("-", "_")
+    end
+
     # The project name: the main worktree's directory name, even when called from
     # a linked worktree.
     def project

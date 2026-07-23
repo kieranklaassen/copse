@@ -16,6 +16,11 @@ gem "minitest", "~> 5.25"
 gem "railties", ">= 7.1"
 gem "actionmailer", ">= 7.1"
 
+# Needed so the per-worktree database rename is tested against real
+# ActiveRecord::DatabaseConfigurations objects rather than a double. No database
+# adapter gem is required: nothing here ever opens a connection.
+gem "activerecord", ">= 7.1"
+
 # Needed so the teardown tests in U1 actually run rather than skipping. Copse
 # invokes foreman as a subprocess and never requires it, so this is a test
 # dependency only -- it is deliberately absent from the gemspec.
