@@ -109,6 +109,23 @@ class OvermindTest < Minitest::Test
     refute_includes @out.string, "entry"
   end
 
+  # --- The explicit port flag ----------------------------------------------
+
+  def test_warns_when_the_web_line_sets_its_own_port
+    # The foreman path strips this flag; overmind runs the app's own Procfile, so
+    # the flag survives and `rails server` honours it over PORT.
+    session("web: bin/rails s --port 3000\ncss: bin/watch\n").exec_overmind
+
+    assert_includes @out.string, "explicit port"
+    assert_includes @out.string, "5368"
+  end
+
+  def test_is_quiet_when_the_web_line_leaves_the_port_alone
+    session("web: bin/rails server\n").exec_overmind
+
+    refute_includes @out.string, "explicit port"
+  end
+
   # --- The probe -----------------------------------------------------------
 
   def test_the_probe_fails_when_overmind_is_not_on_path

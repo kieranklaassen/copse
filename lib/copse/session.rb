@@ -270,7 +270,25 @@ module Copse
     def exec_overmind(args = [])
       @out.puts "=> Copse: #{worktree.url}"
       @out.puts overmind_web_position_warning if web_out_of_position?
+      @out.puts overmind_port_flag_warning if web_port_flag?
       exec(overmind_env, "overmind", "start", "-f", procfile_path, "-p", worktree.port.to_s, *args)
+    end
+
+    # An explicit `--port` on the `web` line beats PORT in `rails server`, and
+    # vite_ruby's own example ships one. The foreman path strips it, but only
+    # because Copse builds that command itself; here Overmind runs the app's own
+    # Procfile, and rewriting it into a temp copy would mean `overmind restart` and
+    # the file the developer edits were no longer the same thing. So this is a
+    # warning, the same call the signal-transparency transform makes for shapes it
+    # will not rewrite.
+    def web_port_flag?
+      entry = procfile&.web
+      !entry.nil? && Procfile.port_flag?(entry.command)
+    end
+
+    def overmind_port_flag_warning
+      "copse: the `web` line in Procfile.dev sets an explicit port, which beats the derived " \
+        "#{worktree.port} -- so the app will not be at #{worktree.url}. Remove the flag."
     end
 
     # OVERMIND_SKIP_ENV is this path's `--env /dev/null`, and for the same reason:
