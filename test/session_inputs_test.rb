@@ -188,6 +188,24 @@ class SessionInputsTest < Minitest::Test
     end
   end
 
+  def test_warns_about_a_bare_tailwind_watch_and_still_runs_it
+    out = StringIO.new
+    File.write(File.join(@root, "Procfile.dev"),
+               "web: bin/rails server\ncss: tailwindcss -i a.css -o b.css --watch\n")
+    s = Copse::Session.new(@worktree, root: @root, out: out)
+
+    path = s.write_temp_procfile
+    dir = File.dirname(path)
+    begin
+      assert_includes out.string, "`css`"
+      assert_includes out.string, "--watch=always"
+      # A warning, not a rewrite: the app's own command is what runs.
+      assert_includes File.read(path), "css: tailwindcss -i a.css -o b.css --watch"
+    ensure
+      FileUtils.remove_entry(dir)
+    end
+  end
+
   # --- Foreman probe (KTD9) -------------------------------------------------
 
   def test_the_probe_succeeds_when_foreman_works

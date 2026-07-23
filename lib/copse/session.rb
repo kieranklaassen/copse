@@ -242,7 +242,39 @@ module Copse
     def procfile
       return @procfile if defined?(@procfile)
 
-      @procfile = Procfile.load(File.join(root, "Procfile.dev"))
+      @procfile = Procfile.load(procfile_path)
+    end
+
+    def procfile_path = File.join(root, "Procfile.dev")
+
+    # Hands the whole Procfile -- `web` included -- to Overmind, replacing this
+    # process. Never returns.
+    #
+    # There is no split session here and no foreground/background distinction to
+    # preserve: Overmind gives every process its own tmux pty, so `binding.irb`
+    # works over `overmind connect web` rather than by holding this terminal. All
+    # Copse contributes on this path is the environment.
+    #
+    # The environment is `copse_env` unoffset -- deliberately not
+    # `foreman_port_env`. Overmind derives each child's port as
+    # `base + index * 100` from PORT just as foreman does, but here it supervises
+    # `web` too, so offsetting the base would hand `web` a port Copse never
+    # derived and the banner above would name the wrong URL.
+    def exec_overmind(args = [])
+      @out.puts "=> Copse: #{worktree.url}"
+      @out.puts overmind_web_position_warning if web_out_of_position?
+      exec(copse_env, "overmind", "start", "-f", procfile_path, *args)
+    end
+
+    # Whether `overmind start` will actually work. Overmind is a Go binary rather
+    # than a gem, so unlike foreman there is no bundler environment to strip and no
+    # version-manager shim to see past -- but probing still beats `command -v`,
+    # which succeeds on an unexecutable file.
+    def overmind_available?
+      _out, _err, status = Open3.capture3("overmind", "version")
+      status.success?
+    rescue Errno::ENOENT, Errno::EACCES
+      false
     end
 
     # The variables every process Copse starts receives.
@@ -353,6 +385,22 @@ module Copse
       secondaries.any?
     end
 
+    # Only Overmind cares: it hands `web` the port at its Procfile index, so a
+    # `web` line that is not first gets `port + index * 100`. On the foreman path
+    # Copse spawns `web` itself with the derived PORT, so its position is
+    # irrelevant.
+    def web_out_of_position?
+      entry = procfile&.web
+      !entry.nil? && procfile.entries.first != entry
+    end
+
+    def overmind_web_position_warning
+      index = procfile.entries.index(procfile.web)
+      "copse: `web` is entry #{index + 1} in Procfile.dev, so overmind will start it on " \
+        "#{worktree.port + index * 100} rather than the derived port #{worktree.port} " \
+        "(each process gets base + index * 100). Move `web` to the top of Procfile.dev."
+    end
+
     # Writes the secondaries to a Procfile foreman can run, inside a private
     # directory. The file's contents are commands foreman will execute, and
     # derived hostnames are deliberately reproducible, so a predictable path in a
@@ -370,6 +418,8 @@ module Copse
       lines = secondaries.map do |entry|
         command, warning = Procfile.signal_transparent(entry.command)
         @out.puts "copse: `#{entry.name}` #{warning}" if warning
+        stdin_warning = Procfile.stdin_sensitive_warning(entry.command)
+        @out.puts "copse: `#{entry.name}` #{stdin_warning}" if stdin_warning
         "#{entry.name}: #{command}\n"
       end
 

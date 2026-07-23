@@ -54,12 +54,28 @@ module Copse
   # configuration accessor, so there is no memoized state that can go stale.
   AVAILABLE_PORTS = (PORT_RANGE.to_a - RESERVED_PORTS).freeze
 
+  # The supervisors `bin/dev` can be generated against. Only the supervisor
+  # differs: the derivation is a pure function of the worktree and knows nothing
+  # about either one.
+  PROCESS_MANAGERS = %w[foreman overmind].freeze
+
   # Boots the app. This is what `bin/dev` calls.
   #
   # Returns the exit status of the foreground process so `bin/dev` can propagate
   # it, which matters for shell `&&` chains and scripted use.
-  def self.start(root: Dir.pwd)
-    Session.new(Worktree.new(root)).start
+  #
+  # `process_manager: :overmind` hands the whole Procfile to Overmind instead,
+  # replacing this process, and `args` is forwarded to it (`bin/dev -l web`).
+  def self.start(root: Dir.pwd, process_manager: :foreman, args: [])
+    session = Session.new(Worktree.new(root))
+
+    # `exec_overmind` never returns, so falling through to the foreman session
+    # means overmind is not installed *on this machine*. That is a fallback rather
+    # than an error on purpose: `bin/dev` is committed, and a teammate without
+    # overmind should still boot.
+    session.exec_overmind(args) if process_manager.to_s == "overmind" && session.overmind_available?
+
+    session.start
   end
 
   # The derived port for a hostname. A pure function: same hostname, same port,
