@@ -161,6 +161,28 @@ Rails 8's development host allowlist already includes `.localhost`, so no `confi
 - Some Procfile lines cannot be made signal-transparent, so Copse warns and leaves them exactly as written rather than rewriting them into something subtly different. Their children may survive teardown; split them into separate entries to fix it. The shapes are a **pipeline** (`a | b`), a **background `&`**, a **command substitution** (`$(...)` or backticks), and a **subshell** (`(...)`). Each keeps a shell in front of the real process, and no `exec` placement collapses that into one signalable pid — `exec (cd x && y)` is not even valid shell syntax.
 - Out of scope: reverse proxy, daemon, TLS, port registry, and `/etc/hosts` management.
 
+## History
+
+See [CHANGELOG.md](CHANGELOG.md).
+
+## Contributing
+
+Issues and pull requests are welcome. Especially useful:
+
+- **A `.localhost` row you can verify.** The resolution table above marks rows *unverified* when they come from primary sources rather than a machine — replacing one with a measurement is a real contribution.
+- **A Procfile line Copse handles wrongly.** Include the line verbatim.
+
+To get set up:
+
+```sh
+git clone https://github.com/kieranklaassen/copse.git
+cd copse
+bundle install
+bundle exec rake test
+```
+
+The suite drives real processes rather than mocking them, so it needs `foreman` (a dev dependency) and takes about a minute. Two tests bind a derived port; they fail if something else on your machine already holds it. `BUNDLE_GEMFILE=gemfiles/rails71.gemfile bundle exec rake test` checks the oldest supported Rails.
+
 ## License
 
 MIT — see [LICENSE.txt](LICENSE.txt).
