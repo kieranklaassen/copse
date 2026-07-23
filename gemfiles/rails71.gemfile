@@ -13,5 +13,8 @@ gem "minitest", "~> 5.25"
 
 gem "railties", "~> 7.1.0"
 gem "actionmailer", "~> 7.1.0"
+# Pinned here for the same reason: the database rename reaches into
+# ActiveRecord::DatabaseConfigurations and calls `_database=`, which is `:nodoc:`.
+gem "activerecord", "~> 7.1.0"
 
 gem "foreman", ">= 0.90.0"
