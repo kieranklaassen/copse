@@ -136,6 +136,49 @@ class OvermindTest < Minitest::Test
     assert_includes out, "overmind-port: #{port}"
   end
 
+  def test_overmind_is_told_to_skip_its_own_env_file
+    s = session("web: bin/rails server\n")
+
+    s.exec_overmind
+
+    assert_equal "1", s.exec_env["OVERMIND_SKIP_ENV"]
+  end
+
+  # --- Against the real binary ---------------------------------------------
+  #
+  # The probe and the env handling are claims about overmind's CLI, and a stand-in
+  # can only confirm the shape it was written to. These run when overmind is
+  # actually installed.
+
+  def test_the_probe_matches_the_real_overmind_cli
+    skip "overmind is not installed" unless real_overmind?
+
+    assert_predicate session("web: bin/rails server\n"), :overmind_available?
+  end
+
+  def test_the_real_overmind_has_no_version_subcommand
+    # Why the probe uses `--version`: this is what an `overmind version` probe would
+    # have seen, on every machine, forever silently downgrading to foreman.
+    skip "overmind is not installed" unless real_overmind?
+
+    _out, _err, status = Open3.capture3("overmind", "version")
+
+    refute_predicate status, :success?
+  end
+
+  def test_a_port_in_dot_env_does_not_beat_the_derived_port
+    skip "overmind and tmux are not both installed" unless real_overmind? && tmux?
+
+    File.write(File.join(@root, ".env"), "PORT=9999\n")
+    File.write(File.join(@root, "Procfile.dev"), %(web: sh -c "echo web-port=$PORT"\n))
+    port = Copse::Worktree.new(@root).port
+
+    out = run_start(path: ENV.fetch("PATH"))
+
+    assert_includes out, "web-port=#{port}"
+    refute_includes out, "web-port=9999"
+  end
+
   def test_start_falls_back_to_the_foreman_session_when_overmind_is_missing
     # bin/dev is committed, so a teammate without overmind still has to boot.
     File.write(File.join(@root, "Procfile.dev"), "web: echo booted\n")
@@ -148,21 +191,32 @@ class OvermindTest < Minitest::Test
 
   private
 
-  # A stand-in overmind: answers `version`, and on `start` prints what it was
-  # handed instead of supervising anything.
+  # A stand-in overmind, shaped like the real CLI: `--version` succeeds and a
+  # `version` subcommand does not exist (real overmind exits 3 on it). On `start` it
+  # prints what it was handed instead of supervising anything.
   def fake_overmind
     dir = File.join(@root, "fake")
     FileUtils.mkdir_p(dir)
     path = File.join(dir, "overmind")
     File.write(path, <<~SH)
       #!/bin/sh
-      if [ "$1" = "version" ]; then echo "Overmind version 2.5.1"; exit 0; fi
-      echo "overmind-argv: $@"
+      case "$1" in
+        --version|-v) echo "Overmind version 2.5.1"; exit 0 ;;
+        start|s) ;;
+        *) echo "No help topic for '$1'" >&2; exit 3 ;;
+      esac
+      shift
+      echo "overmind-argv: start $@"
       echo "overmind-port: $PORT"
+      echo "overmind-skip-env: $OVERMIND_SKIP_ENV"
     SH
     File.chmod(0o755, path)
     dir
   end
+
+  def real_overmind? = system("overmind", "--version", out: File::NULL, err: File::NULL)
+
+  def tmux? = system("tmux", "-V", out: File::NULL, err: File::NULL)
 
   def with_path(dir)
     previous = ENV["PATH"]

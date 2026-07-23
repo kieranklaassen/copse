@@ -263,15 +263,33 @@ module Copse
     def exec_overmind(args = [])
       @out.puts "=> Copse: #{worktree.url}"
       @out.puts overmind_web_position_warning if web_out_of_position?
-      exec(copse_env, "overmind", "start", "-f", procfile_path, *args)
+      exec(overmind_env, "overmind", "start", "-f", procfile_path, *args)
+    end
+
+    # OVERMIND_SKIP_ENV is this path's `--env /dev/null`, and for the same reason.
+    #
+    # Overmind loads the app's `.env` itself and applies it *over* the environment
+    # it was handed, so a `PORT` in `.env` -- measured against Overmind 2.5.1 --
+    # silently beats the derived one: the app binds a port Copse never derived while
+    # the banner and COPSE_PORT name the one it did.
+    #
+    # This suppresses only the supervisor's env-file loading, not the app's.
+    # dotenv-rails still reads `.env` inside Rails, exactly as it does on the
+    # foreman path.
+    def overmind_env
+      copse_env.merge("OVERMIND_SKIP_ENV" => "1")
     end
 
     # Whether `overmind start` will actually work. Overmind is a Go binary rather
     # than a gem, so unlike foreman there is no bundler environment to strip and no
     # version-manager shim to see past -- but probing still beats `command -v`,
     # which succeeds on an unexecutable file.
+    #
+    # `--version`, not `version`: Overmind has no `version` subcommand and exits 3
+    # on one, which would make every probe fail and silently downgrade the whole
+    # path to foreman.
     def overmind_available?
-      _out, _err, status = Open3.capture3("overmind", "version")
+      _out, _err, status = Open3.capture3("overmind", "--version")
       status.success?
     rescue Errno::ENOENT, Errno::EACCES
       false
