@@ -21,13 +21,16 @@ class RailtieTest < Minitest::Test
   # `preset` runs before initialize!, so a scenario can simulate an app that sets
   # its own URL options.
   # `database_yml` opts the child into Active Record, with that YAML as the app's
-  # config/database.yml and @dir as the app root.
-  def boot(env:, rails_env: "development", preset: nil, load_mailer: true, database_yml: nil)
+  # config/database.yml. `app_root` is where that app lives, which for the
+  # database scenarios is a real git checkout -- the rename is derived from the
+  # checkout on disk and from nothing else, so faking it through the environment
+  # would prove nothing.
+  def boot(env:, rails_env: "development", preset: nil, load_mailer: true, database_yml: nil,
+           app_root: nil)
     reader, writer = IO.pipe
-    root = __dir__
+    root = app_root || __dir__
 
     if database_yml
-      root = @dir
       FileUtils.mkdir_p(File.join(root, "config"))
       File.write(File.join(root, "config", "database.yml"), database_yml)
     end
@@ -200,8 +203,9 @@ class RailtieTest < Minitest::Test
   def test_a_linked_worktree_gets_its_own_development_databases
     skip "ActiveRecord::ConnectionAdapters.register needs Rails 7.2+" unless adapter_registry?
 
-    result = boot(env: COPSE_ENV.merge("COPSE_DATABASE_SUFFIX" => "fix_billing"),
-                  database_yml: DATABASE_YML)
+    result = with_git_repo(name: "cora") do |repo|
+      with_linked_worktree(repo, "fix-billing") { |linked| boot_with_database(app_root: linked) }
+    end
 
     assert_nil result[:error], result[:error]
     assert_equal "cora_development_fix_billing", result.dig(:databases, :primary)
@@ -214,11 +218,12 @@ class RailtieTest < Minitest::Test
   def test_a_main_worktree_keeps_the_database_the_app_already_has
     skip "ActiveRecord::ConnectionAdapters.register needs Rails 7.2+" unless adapter_registry?
 
-    # No suffix: this is the app's own checkout, and its database must not move.
-    # The root here is a temp directory, so the fallback derivation finds no
-    # linked worktree either.
-    result = boot(env: COPSE_ENV.merge("COPSE_DATABASE_SUFFIX" => nil),
-                  database_yml: DATABASE_YML)
+    # A stale COPSE_DATABASE_SUFFIX is the case this pins: it outlives the session
+    # that set it (a shell opened from a linked worktree's `bin/dev`, a leftover
+    # line in `.env`), and the app's own checkout has to win anyway.
+    result = with_git_repo(name: "cora") do |repo|
+      boot_with_database(app_root: repo, env: { "COPSE_DATABASE_SUFFIX" => "fix_billing" })
+    end
 
     assert_nil result[:error], result[:error]
     assert_equal "cora_development", result.dig(:databases, :primary)
@@ -228,11 +233,19 @@ class RailtieTest < Minitest::Test
   def test_a_non_development_environment_keeps_its_database
     skip "ActiveRecord::ConnectionAdapters.register needs Rails 7.2+" unless adapter_registry?
 
-    result = boot(env: COPSE_ENV.merge("COPSE_DATABASE_SUFFIX" => "fix_billing"),
-                  rails_env: "production", database_yml: DATABASE_YML)
+    result = with_git_repo(name: "cora") do |repo|
+      with_linked_worktree(repo, "fix-billing") do |linked|
+        boot_with_database(app_root: linked, rails_env: "production")
+      end
+    end
 
     assert_nil result[:error], result[:error]
     assert_equal "cora_production", result.dig(:databases, :primary)
+  end
+
+  def boot_with_database(app_root:, env: {}, rails_env: "development")
+    boot(env: COPSE_ENV.merge(env), rails_env: rails_env, database_yml: DATABASE_YML,
+         app_root: app_root)
   end
 
   def adapter_registry?

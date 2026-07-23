@@ -9,10 +9,11 @@ module Copse
   # Rails-free so they can be tested without booting an application, and the
   # railtie is only the wiring.
   #
-  # The suffix comes from the worktree rather than from the environment Copse
-  # exports, so `bin/rails db:prepare` and `bin/rails console` in a linked
-  # worktree reach the same database `bin/dev` does. A database that only existed
-  # when Copse booted the app would be a database no rake task could create.
+  # The suffix is derived from the checkout on disk rather than from the
+  # environment Copse exports, so `bin/rails db:prepare` and `bin/rails console`
+  # in a linked worktree reach the same database `bin/dev` does. A database that
+  # only existed when Copse booted the app would be a database no rake task could
+  # create.
   module Database
     # A main worktree keeps its plain database name, so only a linked worktree is
     # renamed. That is what makes this safe to add to an existing app: the
@@ -39,13 +40,13 @@ module Copse
 
     # The suffix for this checkout, or nil in a main worktree.
     #
-    # Prefers COPSE_DATABASE_SUFFIX, which `bin/dev` exports, so a process Copse
-    # started does not shell out to git again -- and so a single value is shared
-    # by everything in that session.
-    def self.suffix(env: ENV, root: Dir.pwd)
-      exported = env["COPSE_DATABASE_SUFFIX"]
-      return exported unless exported.to_s.empty?
-
+    # The checkout on disk is the only authority, never the exported
+    # COPSE_DATABASE_SUFFIX -- which is deliberate rather than just simple. That
+    # variable can outlive the session that set it: a shell opened from a linked
+    # worktree's `bin/dev`, or a stale line in the app's own `.env` that
+    # dotenv-rails loads. Reading it here would let either one rename a *main*
+    # worktree's database, which is the one promise this feature makes.
+    def self.suffix(root: Dir.pwd)
       Worktree.new(root).database_suffix
     end
 

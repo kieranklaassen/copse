@@ -9,9 +9,11 @@
   file-backed databases (SQLite) and entries marked `database_tasks: false` are
   left alone, replicas follow their primary, and names are capped at 63 bytes.
   Copse does not create the database: run `bin/rails db:prepare`. The suffix is
-  derived from the worktree rather than from Copse's own environment, so
-  `db:prepare` and `bin/rails console` reach the same database as `bin/dev`.
-- Exports `COPSE_DATABASE_SUFFIX` in a linked worktree.
+  derived from the checkout on disk rather than from Copse's own environment, so
+  `db:prepare` and `bin/rails console` reach the same database as `bin/dev`, and
+  a stale `COPSE_DATABASE_SUFFIX` cannot rename a main worktree's database.
+- Exports `COPSE_DATABASE_SUFFIX` in a linked worktree, for other processes to
+  read. Copse never reads it back.
 
 ## 0.1.0 (2026-07-23)
 

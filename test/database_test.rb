@@ -60,22 +60,16 @@ class DatabaseTest < Minitest::Test
     assert_nil rename("d" * Copse::Database::NAME_LIMIT, suffix: "fix_billing")
   end
 
-  def test_the_suffix_comes_from_the_exported_environment_when_present
-    # `bin/dev` exports it, so a process Copse started does not shell out to git.
-    assert_equal "fix_billing",
-                 Copse::Database.suffix(env: { "COPSE_DATABASE_SUFFIX" => "fix_billing" },
-                                        root: Dir.pwd)
-  end
-
-  def test_the_suffix_falls_back_to_the_worktree
+  def test_the_suffix_is_derived_from_the_checkout_on_disk
     # Which is what makes `bin/rails db:prepare` reach the same database as
-    # `bin/dev`, having never been started by Copse.
+    # `bin/dev`, having never been started by Copse -- and what keeps a stale
+    # COPSE_DATABASE_SUFFIX in the environment from renaming a main worktree's
+    # database. The checkout is the only authority.
     with_git_repo(name: "cora") do |root|
-      assert_nil Copse::Database.suffix(env: {}, root: root)
+      assert_nil Copse::Database.suffix(root: root)
 
       with_linked_worktree(root, "feat/fix-billing") do |linked|
-        assert_equal "fix_billing", Copse::Database.suffix(env: {}, root: linked)[-11..]
-        assert_equal "feat_fix_billing", Copse::Database.suffix(env: {}, root: linked)
+        assert_equal "feat_fix_billing", Copse::Database.suffix(root: linked)
       end
     end
   end
