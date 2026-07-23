@@ -70,15 +70,20 @@ module Copse
       def report_process_manager
         return unless File.exist?(absolute(PROCFILE))
 
+        secondaries = Copse::Procfile.parse(File.read(absolute(PROCFILE))).secondaries
+
         if overmind?
           say ""
           say "bin/dev hands all of Procfile.dev to overmind; attach with `overmind connect web`."
           say "Keep `web` first in Procfile.dev: overmind gives each process base + index * 100."
           say "Without overmind installed, bin/dev falls back to the foreman session."
+          # The fallback is not hypothetical -- overmind is probed per machine, so a
+          # teammate without it lands on foreman and needs it for these entries.
+          say "Which needs foreman, so keep `gem \"foreman\"` available too." if secondaries.any?
           return
         end
 
-        return if Copse::Procfile.parse(File.read(absolute(PROCFILE))).secondaries.empty?
+        return if secondaries.empty?
 
         say ""
         say "Copse runs the `web` process in the foreground and hands the rest to foreman."
@@ -109,8 +114,17 @@ module Copse
 
       def overmind? = process_manager == "overmind"
 
+      # Detection looks for a bin/dev that *runs* overmind, not one that merely says
+      # the word: `# migrated off overmind` in a comment of a foreman script must
+      # not flip the supervisor. Either the Copse marker, or an `overmind start`
+      # invocation (`s` is overmind's own alias for it).
+      OVERMIND_INVOCATION = /\bovermind\s+s(?:tart)?\b/
+
       def existing_overmind?
-        exists?(BIN_DEV) && File.read(absolute(BIN_DEV)).match?(/\bovermind\b/)
+        return false unless exists?(BIN_DEV)
+
+        contents = File.read(absolute(BIN_DEV))
+        contents.include?(OVERMIND_MARKER) || contents.match?(OVERMIND_INVOCATION)
       end
 
       # Interpolated into the bin/dev template. ARGV is forwarded only on the

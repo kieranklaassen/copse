@@ -113,7 +113,7 @@ Consequences of Overmind supervising everything, `web` included:
 - `bin/dev`'s arguments go to `overmind start`, so `bin/dev -l web` works.
 - No pty problems, so none of the stdin traps below apply.
 
-`bin/dev` is committed, and Overmind is a binary rather than a gem, so it's checked at run time, not generate time: a teammate without Overmind falls back to the foreman session automatically.
+`bin/dev` is committed, and Overmind is a binary rather than a gem, so it's checked at run time, not generate time: a teammate without Overmind falls back to the foreman session automatically. Which is a reason to keep `foreman` in the Gemfile anyway if `Procfile.dev` has non-`web` entries — that machine will need it.
 
 ## Where `*.localhost` resolves
 

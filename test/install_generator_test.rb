@@ -15,6 +15,17 @@ class InstallGeneratorTest < Minitest::Test
     Copse::Generators::InstallGenerator.start(["--quiet", *args], destination_root: @root)
   end
 
+  # --quiet mutes the shell entirely, so the closing advice has to be read from an
+  # unmuted run.
+  def capture_say(*args)
+    previous = $stdout
+    $stdout = StringIO.new
+    Copse::Generators::InstallGenerator.start(args, destination_root: @root)
+    $stdout.string
+  ensure
+    $stdout = previous
+  end
+
   def read(relative) = File.read(File.join(@root, relative))
   def exists?(relative) = File.exist?(File.join(@root, relative))
 
@@ -80,6 +91,27 @@ class InstallGeneratorTest < Minitest::Test
     assert_equal "#!/bin/sh\nexec overmind start -f Procfile.dev\n", read("bin/dev.before-copse")
   end
 
+  def test_the_word_overmind_in_a_comment_does_not_flip_the_supervisor
+    # Detection must find a bin/dev that *runs* overmind, not one that mentions it.
+    File.write(File.join(@root, "bin/dev"), <<~SH)
+      #!/bin/sh
+      # We used to run overmind here.
+      exec foreman start -f Procfile.dev
+    SH
+
+    run_generator
+
+    refute_includes read("bin/dev"), "overmind"
+  end
+
+  def test_the_overmind_start_alias_is_detected
+    File.write(File.join(@root, "bin/dev"), "#!/bin/sh\nexec overmind s -f Procfile.dev\n")
+
+    run_generator
+
+    assert_includes read("bin/dev"), "process_manager: :overmind"
+  end
+
   def test_an_explicit_foreman_flag_beats_detection
     File.write(File.join(@root, "bin/dev"), "#!/bin/sh\nexec overmind start -f Procfile.dev\n")
 
@@ -125,6 +157,26 @@ class InstallGeneratorTest < Minitest::Test
     assert_includes message, "foreman"
     assert_includes message, "overmind"
     refute exists?("bin/dev"), "a refused run still wrote bin/dev"
+  end
+
+  def test_the_overmind_path_still_names_foreman_for_the_fallback
+    # The overmind bin/dev falls back to the foreman session on a machine without
+    # overmind, and these entries need foreman there.
+    File.write(File.join(@root, "Procfile.dev"), "web: bin/rails server\ncss: bin/watch\n")
+
+    said = capture_say("--process-manager=overmind")
+
+    assert_includes said, "overmind connect web"
+    assert_includes said, "foreman"
+  end
+
+  def test_the_overmind_path_asks_for_no_foreman_with_nothing_to_supervise
+    # A web-only Procfile needs no foreman on either path, so the fallback is still
+    # named but nothing is asked for.
+    said = capture_say("--process-manager=overmind")
+
+    assert_includes said, "falls back to the foreman session"
+    refute_includes said, "gem \"foreman\""
   end
 
   def test_the_generated_overmind_bin_dev_is_valid_ruby
