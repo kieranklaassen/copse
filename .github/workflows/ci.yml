@@ -18,6 +18,16 @@ jobs:
         # exec-transform tests exercise.
         os: [ubuntu-latest, macos-latest]
         ruby: ["3.2", "3.3", "3.4"]
+        include:
+          # The root Gemfile pins no Rails version, so every job above resolves the
+          # newest one and the 7.1 floor the README claims goes unverified. One job
+          # holds the other end of the range.
+          - os: ubuntu-latest
+            ruby: "3.2"
+            gemfile: gemfiles/rails71.gemfile
+
+    env:
+      BUNDLE_GEMFILE: ${{ matrix.gemfile || 'Gemfile' }}
 
     steps:
       - uses: actions/checkout@v4

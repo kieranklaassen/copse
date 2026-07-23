@@ -81,13 +81,22 @@ class SessionInputsTest < Minitest::Test
     # Proven by observing a real child process, not by inspecting the hash:
     # Process.spawn merges rather than replaces, so handing it
     # Bundler.original_env would leave the inherited BUNDLE_* keys in place.
-    out, _err, status = Open3.capture3(
-      session.foreman_env_candidates.first, "ruby", "-e", "puts ENV.fetch('BUNDLE_GEMFILE', 'ABSENT')"
-    )
+    #
+    # The expectation is whatever preceded bundler rather than a literal "ABSENT".
+    # A BUNDLE_GEMFILE already exported by the shell -- which is how
+    # gemfiles/rails71.gemfile is run -- is not the same thing as bundler having set
+    # one, and only the second is Copse's to undo. RUBYOPT is checked alongside it
+    # because bundler's `-rbundler/setup` is what actually pulls foreman into this
+    # bundle, and no ambient value makes that legitimate.
+    script = "puts ENV.fetch('BUNDLE_GEMFILE', 'ABSENT'); puts ENV.fetch('RUBYOPT', 'ABSENT')"
+    out, _err, status = Open3.capture3(session.foreman_env_candidates.first, "ruby", "-e", script)
+    gemfile, rubyopt = out.lines.map(&:strip)
 
     assert_predicate status, :success?
-    assert_equal "ABSENT", out.strip,
+    assert_equal Bundler.original_env.fetch("BUNDLE_GEMFILE", "ABSENT"), gemfile,
                  "foreman would inherit the bundle and fail with 'not currently included in the bundle'"
+    refute_includes rubyopt, "bundler/setup",
+                    "foreman would still be loaded through this bundle's setup"
   end
 
   def test_every_foreman_environment_carries_the_copse_variables
@@ -264,11 +273,19 @@ class SessionInputsTest < Minitest::Test
 
     candidates = session.foreman_env_candidates
 
+    # What a child actually sees, since Process.spawn merges: a key the candidate
+    # omits is inherited rather than unset. Asserting on the hash alone read a
+    # shell-exported BUNDLE_GEMFILE -- how gemfiles/rails71.gemfile is run -- as the
+    # bundle leaking through, when the override Copse owes it is only ever back to
+    # the pre-bundler value.
+    effective = ->(candidate, key) { candidate.key?(key) ? candidate[key] : ENV[key] }
+
     assert_equal 2, candidates.size
-    refute candidates.first.key?("BUNDLE_GEMFILE") && candidates.first["BUNDLE_GEMFILE"],
-           "the preferred candidate still carries the bundle"
-    assert_nil candidates.last["BUNDLE_GEMFILE"],
-               "the inherited candidate should not override BUNDLE_GEMFILE at all"
+    assert_equal Bundler.original_env["BUNDLE_GEMFILE"],
+                 effective.call(candidates.first, "BUNDLE_GEMFILE"),
+                 "the preferred candidate still carries this bundle"
+    refute candidates.last.key?("BUNDLE_GEMFILE"),
+           "the inherited candidate should not override BUNDLE_GEMFILE at all"
   end
 
   def test_falls_back_to_the_inherited_environment_when_the_stripped_one_cannot_find_foreman
