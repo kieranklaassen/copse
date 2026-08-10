@@ -26,10 +26,11 @@ module Copse
 
     attr_reader :worktree, :root
 
-    def initialize(worktree, root: nil, out: $stdout)
+    def initialize(worktree, root: nil, out: $stdout, advertiser: nil)
       @worktree = worktree
       @root = File.expand_path(root || worktree.root)
       @out = out
+      @advertiser = advertiser
     end
 
     # Boots the app and returns the foreground process's exit status.
@@ -46,6 +47,11 @@ module Copse
       # used to escape the handler entirely -- which surfaced as a bogus "cannot run
       # foreman" error rather than a clean interrupt.
       guarded do
+        # Inside the guard, not before it: the announcement opens sockets and
+        # starts threads, and a signal arriving during that has to reach the
+        # teardown that withdraws the names again.
+        @advertiser&.start
+
         # No secondaries means no foreman -- not even a preflight. The Procfile the
         # install generator writes has only a `web` line, so preflighting a tool
         # this run will never use would refuse to boot the most common app. Running
@@ -148,11 +154,22 @@ module Copse
     # foreman up front means its own 5s SIGTERM-to-SIGKILL escalation runs in
     # parallel with the web process shutting down.
     def teardown
+      # First, and before anything is waited on: withdrawing a name is a packet,
+      # not a wait, and the reaping below can take seconds. A name left announced
+      # after the port stops answering is a name that resolves to a closed door,
+      # cached for its TTL on every device that heard it.
+      stop_advertising
       signal_foreman
       terminate_web
       reap_foreman
       remove_temp_procfile
       restore_term_trap
+    end
+
+    def stop_advertising
+      @advertiser&.stop
+    rescue StandardError => e
+      @out.puts "copse: could not stop advertising cleanly: #{e.message} (#{e.class})"
     end
 
     def terminate_web
@@ -272,6 +289,10 @@ module Copse
       @out.puts overmind_web_position_warning if web_out_of_position?
       @out.puts overmind_port_flag_warning if web_port_flag?
 
+      # Threads do not survive the exec below, so the advertiser is forked into a
+      # process that watches this pid instead. See Advertiser#fork_watching_parent.
+      @advertiser&.fork_watching_parent
+
       # Matches the `chdir: root` both foreman and the foreground web spawn use, but
       # for a different reason. The processes themselves are fine either way --
       # Overmind takes their working directory from the Procfile's own directory, so
@@ -351,6 +372,32 @@ module Copse
         "COPSE_URL" => worktree.url,
         "VITE_RUBY_PORT" => worktree.companion_port.to_s,
         "COPSE_DATABASE_SUFFIX" => worktree.database_suffix
+      }.merge(reachability_env)
+    end
+
+    # What an advertised name needs on top of a derived one, and nothing when
+    # there is no advertised name.
+    #
+    # A `.local` name resolves to this machine's address on the network, not to
+    # loopback. `rails server` binds `localhost` in development, so without
+    # BINDING the app would answer only on an address the advertised name does not
+    # point at -- unreachable from a phone, and unreachable from this machine's own
+    # browser under that name. An inherited BINDING wins, as does an explicit `-b`
+    # on the `web` line or a `bind` in config/puma.rb: Copse sets the default here,
+    # it does not take the decision away.
+    #
+    # Rails' development host allowlist covers `.localhost` and `.test`, not
+    # `.local`, so every request under the advertised name would be blocked. The
+    # leading dot also covers one level of subdomain, which is exactly the shape
+    # `subdomains` publishes.
+    def reachability_env
+      return {} if @advertiser.nil?
+
+      allowed = [ENV["RAILS_DEVELOPMENT_HOSTS"], ".#{worktree.host}"]
+
+      {
+        "BINDING" => ENV["BINDING"] || "0.0.0.0",
+        "RAILS_DEVELOPMENT_HOSTS" => allowed.reject { |value| value.to_s.strip.empty? }.join(",")
       }
     end
 

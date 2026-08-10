@@ -8,6 +8,7 @@ require_relative "copse/worktree"
 require_relative "copse/database"
 require_relative "copse/procfile"
 require_relative "copse/session"
+require_relative "copse/zeroconf"
 
 # Copse gives every Rails app and every git worktree its own hostname and its
 # own port, derived rather than assigned, so nothing collides and nothing has to
@@ -67,8 +68,19 @@ module Copse
   #
   # `process_manager: :overmind` hands the whole Procfile to Overmind instead,
   # replacing this process, and `args` is forwarded to it (`bin/dev -l web`).
-  def self.start(root: Dir.pwd, process_manager: :foreman, args: [])
-    session = Session.new(Worktree.new(root))
+  #
+  # `zeroconf: true` publishes the derived hostname under `.local` over multicast
+  # DNS instead of `.localhost`, for machines whose clients do not resolve
+  # `.localhost` -- and for reaching the app from a phone. Left nil it follows
+  # COPSE_ZEROCONF, so a single developer can opt in without editing the committed
+  # `bin/dev`. `subdomains` names extra labels to publish under the app's own
+  # hostname (`jane.cora.thicc.local`), for apps that serve several; it follows
+  # COPSE_SUBDOMAINS the same way, and does nothing without zeroconf, where the
+  # resolver answers for every label already.
+  def self.start(root: Dir.pwd, process_manager: :foreman, args: [], zeroconf: nil, subdomains: nil,
+                 out: $stdout)
+    worktree, advertiser = derive(root: root, zeroconf: zeroconf, subdomains: subdomains, out: out)
+    session = Session.new(worktree, out: out, advertiser: advertiser)
 
     # `exec_overmind` never returns, so falling through to the foreman session
     # means overmind is not installed *on this machine*. That is a fallback rather
@@ -77,6 +89,30 @@ module Copse
     session.exec_overmind(args) if process_manager.to_s == "overmind" && session.overmind_available?
 
     session.start
+  end
+
+  # The naming decision, split out of `start` so it can be tested without booting
+  # anything. Returns the worktree and, when zeroconf naming is on, the advertiser
+  # that will publish its hostname.
+  #
+  # A missing `zeroconf` gem is a fallback rather than an error, for the same
+  # reason a missing overmind is: the request can come from a committed `bin/dev`,
+  # and a machine that cannot honour it should still boot. The port is unchanged
+  # by the fallback -- it is derived from the `.localhost` name either way -- so
+  # what is lost is the name, not the session.
+  def self.derive(root: Dir.pwd, zeroconf: nil, subdomains: nil, out: $stdout, env: ENV)
+    return [Worktree.new(root), nil] unless Zeroconf.requested?(zeroconf, env: env)
+
+    unless Zeroconf.available?
+      out.puts "copse: zeroconf naming was asked for, but the `zeroconf` gem is not installed " \
+               "for this Ruby. Add `gem \"zeroconf\"` to the development group. " \
+               "Booting under .localhost instead."
+      return [Worktree.new(root), nil]
+    end
+
+    worktree = Worktree.new(root, domain: Zeroconf.domain)
+    hostnames = Zeroconf.hostnames(worktree.host, Zeroconf.subdomains(subdomains, env: env))
+    [worktree, Zeroconf::Advertiser.new(hostnames, port: worktree.port, out: out)]
   end
 
   # The derived port for a hostname. A pure function: same hostname, same port,

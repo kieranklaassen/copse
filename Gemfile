@@ -21,6 +21,13 @@ gem "actionmailer", ">= 7.1"
 # adapter gem is required: nothing here ever opens a connection.
 gem "activerecord", ">= 7.1"
 
+# The optional dependency of the zeroconf naming mode, needed here so the
+# advertiser is tested against the real mDNS implementation rather than a double.
+# 1.2.0 is the floor: `instance_name:` arrived there, and without it a hostname
+# with dots in it -- which is every hostname Copse derives -- cannot be advertised
+# at all.
+gem "zeroconf", ">= 1.2.0"
+
 # Needed so the teardown tests in U1 actually run rather than skipping. Copse
 # invokes foreman as a subprocess and never requires it, so this is a test
 # dependency only -- it is deliberately absent from the gemspec.

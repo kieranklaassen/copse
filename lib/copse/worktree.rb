@@ -11,24 +11,44 @@ module Copse
   class Worktree
     LABEL_LIMIT = 63
 
-    attr_reader :root
+    # RFC 6761's own loopback TLD, and the default: a name under it needs no
+    # advertising, no listener, and no /etc/hosts entry on a client that honours
+    # it. Copse::Zeroconf swaps in `<machine>.local` for the clients that do not.
+    LOCALHOST_DOMAIN = "localhost"
 
-    def initialize(root = Dir.pwd)
+    attr_reader :root, :domain
+
+    def initialize(root = Dir.pwd, domain: LOCALHOST_DOMAIN)
       @root = File.expand_path(root)
+      @domain = domain
     end
 
-    # `<project>.localhost` for a main worktree, `<branch>.<project>.localhost`
-    # for a linked one.
+    # `<project>.<domain>` for a main worktree, `<branch>.<project>.<domain>` for
+    # a linked one.
     def host
-      @host ||= [slug, project, "localhost"].compact.join(".")
+      @host ||= [slug, project, domain].compact.join(".")
+    end
+
+    # The name the port is derived from, which is the `.localhost` one whatever
+    # domain the app is published under.
+    #
+    # Deriving from `host` instead would make the port a function of the naming
+    # mode, and both directions of that are wrong. A developer switching their own
+    # machine to zeroconf naming would find every port moved -- bookmarks, OAuth
+    # callback registrations, a `-p` typed into a script -- for a change that is
+    # supposed to be about names. And the zeroconf name carries the *machine's*
+    # name, so every teammate would derive a different port for the same branch,
+    # which is the coordination-free promise (R4) going the wrong way.
+    def canonical_host
+      @canonical_host ||= [slug, project, LOCALHOST_DOMAIN].compact.join(".")
     end
 
     def port
-      @port ||= Copse.port_for(host)
+      @port ||= Copse.port_for(canonical_host)
     end
 
     def companion_port
-      @companion_port ||= Copse.companion_port_for(host)
+      @companion_port ||= Copse.companion_port_for(canonical_host)
     end
 
     def url

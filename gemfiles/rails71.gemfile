@@ -18,3 +18,6 @@ gem "actionmailer", "~> 7.1.0"
 gem "activerecord", "~> 7.1.0"
 
 gem "foreman", ">= 0.90.0"
+
+# The zeroconf naming mode's optional dependency; see the root Gemfile.
+gem "zeroconf", ">= 1.2.0"

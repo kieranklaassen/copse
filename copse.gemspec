@@ -41,4 +41,9 @@ Gem::Specification.new do |spec|
   # Zero dependencies, runtime or development. Development dependencies live in
   # Gemfile only -- see KTD6 in docs/plans. Foreman is invoked as a subprocess,
   # never required, so it is not a dependency of this gem either.
+  #
+  # The zeroconf naming mode needs the `zeroconf` gem, and it is deliberately not
+  # declared here: it is one naming mode of two, it is opted into per machine, and
+  # an app on `.localhost` should not carry a multicast DNS implementation it never
+  # loads. Copse requires it only when asked for it, and says so if it is missing.
 end
