@@ -318,16 +318,22 @@ class SessionLifecycleTest < Minitest::Test
   # --- Zeroconf naming ------------------------------------------------------
 
   # The whole point of the mode, end to end and on a real network: while the
-  # session runs, the derived `.local` name resolves through the system resolver
-  # -- no /etc/hosts entry, no client that has to special-case the TLD -- and the
-  # foreground process is told to bind an address that name can actually reach.
-  def test_a_zeroconf_session_publishes_a_resolvable_name_and_binds_for_it
+  # session runs, the derived `.local` name is answered for -- no /etc/hosts
+  # entry anywhere -- and the foreground process is told to bind an address that
+  # answer can actually be reached at.
+  #
+  # Queried over mDNS directly rather than through `getaddrinfo`, because those
+  # are two different claims. This one is about Copse and holds on every platform
+  # that can send a multicast packet; whether the *host* then routes `.local`
+  # through its own resolver is the platform's business, and is asserted
+  # separately below.
+  def test_a_zeroconf_session_answers_for_its_name_and_binds_for_it
     require "zeroconf"
     skip "no multicast-capable interface here" if ZeroConf.service_interfaces.empty?
 
     dump = File.join(@app, "web.env")
     ready = File.join(@app, "web.ready")
-    # Long enough to resolve the name from this process while the session holds it.
+    # Long enough to query the name from this process while the session holds it.
     bin("web", "env > #{dump}\necho started > #{ready}\nsleep 12")
     procfile("web: bin/web\n")
 
@@ -335,13 +341,13 @@ class SessionLifecycleTest < Minitest::Test
     refute_nil read_pid_file(ready), "the web process never started: #{File.read(log)}"
 
     host = "cora.#{Copse::Zeroconf.domain}"
-    addresses = resolve(host)
+    answers = mdns_addresses(host)
 
     Process.kill("TERM", pid)
     wait_for_exit(pid)
 
-    refute_empty addresses, "#{host} did not resolve while the session was advertising it"
-    refute_includes addresses, "127.0.0.1",
+    refute_empty answers, "nothing answered an mDNS query for #{host}: #{File.read(log)}"
+    refute_includes answers, "127.0.0.1",
                     "a loopback answer would not be reachable from any other device"
 
     env = File.read(dump).lines.to_h { |l| l.chomp.split("=", 2) }
@@ -355,9 +361,58 @@ class SessionLifecycleTest < Minitest::Test
     assert_includes File.read(log), "#{host}:#{Copse.port_for('cora.localhost')}"
   end
 
-  # mDNS answers arrive asynchronously, and the responder may have to ask the
+  # The claim the README makes for macOS and marks *unverified* for Linux: the
+  # advertised name resolves through the ordinary system resolver, so a browser,
+  # `curl`, and a test suite all reach it with no client-side special-casing.
+  #
+  # Skipped where the host has no mDNS resolver at all -- Linux without avahi or
+  # nss-mdns, and any container -- because that is a property of the machine and
+  # not of this gem. The probe is the machine's own `.local` name, which its
+  # responder publishes without Copse's help, so a host that fails it would fail
+  # for anything.
+  def test_the_advertised_name_resolves_through_the_system_resolver
+    require "zeroconf"
+    skip "no multicast-capable interface here" if ZeroConf.service_interfaces.empty?
+    skip "this host has no mDNS resolver" unless system_resolves_mdns?
+
+    ready = File.join(@app, "web.ready")
+    bin("web", "echo started > #{ready}\nsleep 12")
+    procfile("web: bin/web\n")
+
+    pid, log = spawn_copse(zeroconf: true)
+    refute_nil read_pid_file(ready), "the web process never started: #{File.read(log)}"
+
+    host = "cora.#{Copse::Zeroconf.domain}"
+    addresses = system_addresses(host)
+
+    Process.kill("TERM", pid)
+    wait_for_exit(pid)
+
+    refute_empty addresses, "#{host} did not resolve while the session was advertising it"
+    refute_includes addresses, "127.0.0.1",
+                    "a loopback answer would not be reachable from any other device"
+  end
+
+  # Asks the network directly, with the gem's own client, and stops at the first
+  # answer for this name. Independent of what the host does with `.local`.
+  def mdns_addresses(host, timeout: 8)
+    found = []
+    ZeroConf.resolve(host, timeout: timeout) do |message|
+      records = (message.answer + message.additional).filter_map do |name, _ttl, data|
+        data.address.to_s if data.is_a?(Resolv::DNS::Resource::IN::A) &&
+                             name.to_s.chomp(".").casecmp?(host)
+      end
+      next unless records.any?
+
+      found.concat(records)
+      :done
+    end
+    found.uniq
+  end
+
+  # mDNS answers arrive asynchronously, and the resolver may have to ask the
   # network before it can answer us.
-  def resolve(host, timeout: 8)
+  def system_addresses(host, timeout: 8)
     deadline = Time.now + timeout
     loop do
       begin
@@ -367,6 +422,13 @@ class SessionLifecycleTest < Minitest::Test
       end
       sleep 0.25
     end
+  end
+
+  # Whether `.local` reaches an mDNS responder on this host at all.
+  def system_resolves_mdns?
+    Addrinfo.getaddrinfo("#{Socket.gethostname.split('.').first}.local", nil, nil, :STREAM).any?
+  rescue SocketError
+    false
   end
 
   def test_the_web_processes_exit_status_is_propagated
