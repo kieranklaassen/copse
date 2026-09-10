@@ -53,11 +53,15 @@ Copse runs `web` in the foreground, holding your terminal's stdin and process gr
 
 `<project>` is always the **main** worktree's directory name, so `~/code/cora-fix-billing` on `fix-billing` is `fix-billing.cora.localhost`, not `cora-fix-billing.cora.localhost`.
 
+The suffix is the one thing here you can change: `.localhost` resolves on the machine and nowhere else, and [not on every client](#where-localhost-resolves). [Zeroconf names](#zeroconf-local-names) swap it for `<machine>.local` and put the app on the network.
+
 Names reduce to one DNS label: lowercased, anything outside `[a-z0-9]` collapsed to `-`, capped at 63 characters. `feat/billing-v2` → `feat-billing-v2`. It's a whitelist, not a substitution — git permits `;`, `$(`, and quotes in branch names, and the result reaches your environment and a generated Procfile.
 
 ## Ports
 
 `CRC32(hostname)` indexed into `3000..9999` minus 25 well-known service ports. A pure function: same hostname, same port, on every machine and across reboots and Ruby versions, with no stored state and no coordination.
+
+Always the `.localhost` hostname, even when the app is published under another suffix. Switching a machine to [zeroconf names](#zeroconf-local-names) is about names, so it must not move a port your bookmarks, your OAuth callback registrations, and your teammates still on `.localhost` all point at.
 
 Uncoordinated means collisions are possible. Measured over 20,000 seeded trials against 6,975 available ports:
 
@@ -81,6 +85,8 @@ Changing the range or the reserved list would move nearly every derived port, so
 | `PORT` | the derived port — **`web` process only** |
 | `VITE_RUBY_PORT` | the derived companion port |
 | `COPSE_DATABASE_SUFFIX` | `fix_billing` — **linked worktrees only**, actively unset in a main one |
+| `BINDING` | `0.0.0.0` — **[zeroconf names](#zeroconf-local-names) only**, and never over one you set |
+| `RAILS_DEVELOPMENT_HOSTS` | `.cora.thicc.local` — **zeroconf names only**, appended to any you set |
 
 `COPSE_DATABASE_SUFFIX` is exported for your processes to read; Copse never reads it back. In a main worktree it's *removed* from the child environment rather than merely left unset, so a copy inherited from another worktree's session can't be believed. And the rename below is derived from the checkout on disk, so no stale copy of this variable — a shell opened from a linked worktree, a leftover line in `.env` — can rename a main worktree's database.
 
@@ -176,15 +182,96 @@ For a ❌ row, add a hosts entry — with two caveats:
 
 Neither glibc nor the macOS resolver supports wildcards, so that's **one line per hostname, meaning one per branch**. And it does nothing for Chrome, which hardcodes `.localhost` and [ignores your hosts file](https://issues.chromium.org/issues/41175806) for these names.
 
-On macOS ≤ 15 or bare-glibc Linux and need Safari or `curl`? puma-dev's resolver approach doesn't have this gap. That's a real reason to prefer it.
+On macOS ≤ 15 or bare-glibc Linux and need Safari or `curl`? Either use zeroconf names below, or puma-dev, whose resolver approach doesn't have this gap.
+
+## Zeroconf (`.local`) names
+
+Two reasons to want this:
+
+- **Other devices reach the app by name.** Your phone, a tablet, a real iOS Safari, a VM running end-to-end tests — all of them resolve it, with no `/etc/hosts` entry on any of them. This is the only way to check a mobile layout, or a JS-heavy page on a slow phone, on the actual device.
+- **Clients that don't resolve `.localhost` at all.** Safari and `curl` on macOS before 26 (Tahoe), and bare-glibc Linux — see [the table above](#where-localhost-resolves). On those, `.localhost` isn't a preference, it's a dead end.
+
+`.localhost` is a *SHOULD* that each client decides to honour or not. `.local` is the opposite: [RFC 6762](https://www.rfc-editor.org/rfc/rfc6762) reserves it for multicast DNS, and every desktop and phone already runs a responder for it. Nothing has to special-case the name, because the name gets *answered*.
+
+So Copse can publish the derived hostname over mDNS instead — the technique from [Julik Tarkhanov's write-up](https://blog.julik.nl/2025/05/dev-subdomains-with-zeroconf), using [tenderlove's `zeroconf`](https://github.com/tenderlove/zeroconf) gem:
+
+```ruby
+group :development do
+  gem "copse"
+  gem "zeroconf" # only this mode needs it; Copse itself has no dependencies
+end
+```
+
+```sh
+COPSE_ZEROCONF=1 bin/dev
+```
+
+```
+~/code/cora             on main         →  http://cora.thicc.local:5368
+~/code/cora-fix-billing on fix-billing  →  http://fix-billing.cora.thicc.local:4783
+```
+
+**The ports are the same ones.** Only the suffix moved: `.localhost` became `<machine>.local`, where `thicc` is this machine's own Bonjour name.
+
+That machine label is not decoration. mDNS is a shared namespace, so two people on one network working on one repository would otherwise announce the same `fix-billing.cora.local` and whoever spoke last would win — your browser would land on your colleague's laptop.
+
+### Opting in
+
+`COPSE_ZEROCONF=1` in your shell profile, because which naming mode you need is a property of your machine, not of the repository: same branch, Chrome on Linux is fine with `.localhost` and Safari on macOS 15 is not. `bin/dev` is committed and shared; this doesn't touch it.
+
+For a whole team, put it in `bin/dev` instead:
+
+```ruby
+exit Copse.start(zeroconf: true)
+```
+
+Either way, a machine without the `zeroconf` gem installed says so in one line and boots on `.localhost` — same fallback as a teammate without Overmind. The port doesn't move, so the fallback costs you the name and nothing else.
+
+### What changes
+
+- **The app binds `0.0.0.0`**, via `BINDING`. A `.local` name resolves to this machine's address *on the network*, so a server on loopback would answer at an address the name never points at — unreachable from your phone, and unreachable from your own browser under that name. An inherited `BINDING`, an explicit `-b` on the `web` line, or a `bind` in `config/puma.rb` all still win.
+- **`RAILS_DEVELOPMENT_HOSTS` gets `.<host>`.** Rails' development allowlist is `.localhost`, `.test`, and the two IP ranges — which match address literals, not names — so without this every request under the advertised name gets a 403. Anything you already set is kept. Two limits, both Rails': the leading dot covers the host and **one** subdomain level, so `jane.cora.thicc.local` passes and `deep.jane.cora.thicc.local` does not; and an app that *assigns* `config.hosts` in `config/environments/development.rb` replaces the list this was appended to. Appending (`config.hosts <<`) is fine.
+- **Everything else is unchanged**: the port, the database suffix, `default_url_options`, foreman, Overmind.
+
+### Being on the network
+
+Reachable by every device is the feature, and it is also the cost: someone browsing Bonjour services on the same café Wi-Fi can see the app and connect to it. Fine on a network you trust; think twice on one you don't.
+
+Advertising stops when the session does, including the goodbye packets that withdraw the names. Under Overmind — which replaces Copse's process, so threads can't do it — the advertiser is forked into a process that watches Overmind's pid and withdraws the names when it exits.
+
+### Several subdomains at once
+
+Under `.localhost` every label resolves for free. mDNS answers only for names something announced, so an app serving one subdomain per tenant has to name them:
+
+```sh
+COPSE_SUBDOMAINS=jane,peter,tom COPSE_ZEROCONF=1 bin/dev
+```
+
+```
+jane.cora.thicc.local   peter.cora.thicc.local   tom.cora.thicc.local
+```
+
+All on the same port, all covered by the `RAILS_DEVELOPMENT_HOSTS` entry above. `Copse.start(zeroconf: true, subdomains: %w[jane peter tom])` is the committed form.
+
+### When it doesn't work
+
+- **`.local` is not a secure context, and `.localhost` is.** An origin is [potentially trustworthy](https://w3c.github.io/webappsec-secure-contexts/#is-origin-trustworthy) if it is HTTPS, a loopback address, or a host named `localhost` or ending in `.localhost`. `http://cora.thicc.local` is none of those, so everything [gated on a secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts/features_restricted_to_secure_contexts) turns off: service workers, `getUserMedia`, geolocation, WebAuthn and passkeys, `crypto.subtle`, the async clipboard API, Web Bluetooth/USB/Serial. That bites hardest exactly where this mode is most useful — camera and passkeys are half the reason you wanted the phone. Nothing short of HTTPS fixes it, which is [out of scope](#notes) here; on desktop Chrome you can list the origin in `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, and mobile Safari has no such escape hatch. **If a feature works on `.localhost` and dies on `.local`, this is why** — and switching back is one environment variable.
+- **Multicast has to cross your network.** Most do; some routers bridging Wi-Fi and Ethernet drop it.
+- **Two interfaces, one machine.** The gem announces on the first interface the system returns — on a Mac, the top of Service Order in System Settings. Wired and wireless on different networks means the name may be announced to the one you're not browsing from. Copse prints the address it announced on; if that isn't the one you expect, that's the reason.
+- **On Linux, announcing and resolving are separate installs.** Copse announces fine anywhere a multicast packet can leave the machine — **verified here** in a bare Debian container, which has no responder of its own. Whether the *host* then resolves `.local` is up to it: macOS always does, and Linux needs `avahi` with `nss-mdns` in `/etc/nsswitch.conf`, or `systemd-resolved` with `MulticastDNS=yes`. Without one, the name is answered on the wire and `getaddrinfo` still says no — **verified here**, same container. Other devices on the network are unaffected; this is only about the machine running the app.
+- **`.local` as a corporate search domain.** Windows-era networks sometimes configure it, and those DNS servers then compete with mDNS for the same names.
+- **Nothing to announce on.** With no multicast-capable interface up, Copse says so and boots anyway — the app is still on its port.
+
+`dns-sd -B _http._tcp` lists what's being advertised, and the app appears there under a dotless instance name (`fix-billing-cora-thicc-local`) because mDNS instance names can't contain dots. The hostname keeps them.
 
 ## Requirements
 
 - Ruby >= 3.2.0 (Rails 8.1's own floor; note 3.2 reached EOL 2026-04-01)
 - Rails 7.1+ for the generator and URL options — the derivation itself needs neither Rails nor git
 - `foreman` >= 0.90.0, only for apps with non-`web` Procfile entries — or Overmind instead, on the `--process-manager=overmind` path
+- `zeroconf` >= 1.2.0, only for [zeroconf names](#zeroconf-local-names) — 1.2.0 is where `instance_name:` arrived, without which a hostname containing dots cannot be advertised at all
 
-Rails 8's development host allowlist already includes `.localhost`, so no `config.hosts` change is needed.
+Rails 8's development host allowlist already includes `.localhost`, so no `config.hosts` change is needed. Zeroconf names are not in it; Copse passes those through `RAILS_DEVELOPMENT_HOSTS` instead.
 
 ## Notes
 

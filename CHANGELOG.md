@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+- Adds an optional second naming mode: `<branch>.<project>.<machine>.local`,
+  published over multicast DNS, instead of `<branch>.<project>.localhost`
+  published to nobody. `.localhost` is a *SHOULD* that Safari on macOS ≤ 15 and
+  bare-glibc Linux do not honour; `.local` is answered by the mDNS responder every
+  desktop and phone already runs, and is answered for every device on the network
+  — so the app can be opened from a phone. Opt in per machine with
+  `COPSE_ZEROCONF=1`, or for a team with `Copse.start(zeroconf: true)`.
+  One trade to know about: `.local` is not a secure context and `.localhost` is,
+  so service workers, `getUserMedia`, geolocation, WebAuthn, `crypto.subtle` and
+  the rest of the secure-context features stop working under it. See the README.
+- The derived port is now a function of the `.localhost` hostname whatever mode is
+  in use, so turning zeroconf naming on moves no port — not for the developer
+  turning it on, and not against teammates who have not. Nothing changes for an
+  app on `.localhost`.
+- Exports `BINDING=0.0.0.0` and appends the advertised name to
+  `RAILS_DEVELOPMENT_HOSTS`, on the zeroconf path only. A `.local` name resolves
+  to this machine's network address rather than loopback, and Rails' development
+  host allowlist covers `.localhost` and `.test` but not `.local`. An inherited
+  `BINDING` wins, as does an explicit `-b` or a `bind` in `config/puma.rb`.
+- `COPSE_SUBDOMAINS=jane,peter` (or `subdomains:`) publishes extra names under the
+  app's own, for apps that serve one subdomain per tenant. Under `.localhost`
+  every label resolves for free; mDNS answers only for names something announced.
+- The names are withdrawn when the session ends. Under Overmind, which replaces
+  Copse's process, the advertiser is forked into a process that watches Overmind's
+  pid rather than being kept in a thread that the `exec` would destroy.
+- The `zeroconf` gem (>= 1.2.0) stays an optional dependency and is required only
+  when the mode is asked for. A machine without it says so in one line and boots
+  on `.localhost`, the same fallback as a teammate without Overmind — and since
+  the port does not move, the fallback costs the name and nothing else.
+
 ## 0.1.0 (2026-07-24)
 
 First release.

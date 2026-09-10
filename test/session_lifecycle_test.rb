@@ -74,7 +74,7 @@ class SessionLifecycleTest < Minitest::Test
   # re-prepends its gem bin directory to PATH), so a PATH restriction would not
   # hold. Running unbundled is also the honest simulation of a machine that simply
   # does not have foreman.
-  def spawn_copse(pgroup: false, path: nil)
+  def spawn_copse(pgroup: false, path: nil, zeroconf: false)
     log = File.join(@app, "copse.log")
     script = <<~RUBY
       $LOAD_PATH.unshift(#{LIB.inspect})
@@ -82,6 +82,10 @@ class SessionLifecycleTest < Minitest::Test
       exit(Copse.start(root: #{@app.inspect}))
     RUBY
     env = { "TMPDIR" => @tmp }
+    # Through the environment rather than an argument, because that is the way a
+    # developer whose machine needs it opts in without touching the committed
+    # bin/dev everyone else runs.
+    env["COPSE_ZEROCONF"] = "1" if zeroconf
     spawn = lambda do
       Process.spawn(env, RbConfig.ruby, "-e", script,
                     out: log, err: [:child, :out], pgroup: pgroup)
@@ -309,6 +313,122 @@ class SessionLifecycleTest < Minitest::Test
     wait_for_exit(pid)
 
     assert_includes File.read(log), "cora.localhost:#{Copse.port_for('cora.localhost')}"
+  end
+
+  # --- Zeroconf naming ------------------------------------------------------
+
+  # The whole point of the mode, end to end and on a real network: while the
+  # session runs, the derived `.local` name is answered for -- no /etc/hosts
+  # entry anywhere -- and the foreground process is told to bind an address that
+  # answer can actually be reached at.
+  #
+  # Queried over mDNS directly rather than through `getaddrinfo`, because those
+  # are two different claims. This one is about Copse and holds on every platform
+  # that can send a multicast packet; whether the *host* then routes `.local`
+  # through its own resolver is the platform's business, and is asserted
+  # separately below.
+  def test_a_zeroconf_session_answers_for_its_name_and_binds_for_it
+    require "zeroconf"
+    skip "no multicast-capable interface here" if ZeroConf.service_interfaces.empty?
+
+    dump = File.join(@app, "web.env")
+    ready = File.join(@app, "web.ready")
+    # Long enough to query the name from this process while the session holds it.
+    bin("web", "env > #{dump}\necho started > #{ready}\nsleep 12")
+    procfile("web: bin/web\n")
+
+    pid, log = spawn_copse(zeroconf: true)
+    refute_nil read_pid_file(ready), "the web process never started: #{File.read(log)}"
+
+    host = "cora.#{Copse::Zeroconf.domain}"
+    answers = mdns_addresses(host)
+
+    Process.kill("TERM", pid)
+    wait_for_exit(pid)
+
+    refute_empty answers, "nothing answered an mDNS query for #{host}: #{File.read(log)}"
+    refute_includes answers, "127.0.0.1",
+                    "a loopback answer would not be reachable from any other device"
+
+    env = File.read(dump).lines.to_h { |l| l.chomp.split("=", 2) }
+
+    assert_equal host, env["COPSE_HOST"]
+    assert_equal "0.0.0.0", env["BINDING"], "the app would answer on an address the name misses"
+    assert_equal ".#{host}", env["RAILS_DEVELOPMENT_HOSTS"],
+                 "Rails' development allowlist covers .localhost and .test, not .local"
+    # The name changed; the port must not have.
+    assert_equal Copse.port_for("cora.localhost").to_s, env["PORT"]
+    assert_includes File.read(log), "#{host}:#{Copse.port_for('cora.localhost')}"
+  end
+
+  # The claim the README makes for macOS and marks *unverified* for Linux: the
+  # advertised name resolves through the ordinary system resolver, so a browser,
+  # `curl`, and a test suite all reach it with no client-side special-casing.
+  #
+  # Skipped where the host has no mDNS resolver at all -- Linux without avahi or
+  # nss-mdns, and any container -- because that is a property of the machine and
+  # not of this gem. The probe is the machine's own `.local` name, which its
+  # responder publishes without Copse's help, so a host that fails it would fail
+  # for anything.
+  def test_the_advertised_name_resolves_through_the_system_resolver
+    require "zeroconf"
+    skip "no multicast-capable interface here" if ZeroConf.service_interfaces.empty?
+    skip "this host has no mDNS resolver" unless system_resolves_mdns?
+
+    ready = File.join(@app, "web.ready")
+    bin("web", "echo started > #{ready}\nsleep 12")
+    procfile("web: bin/web\n")
+
+    pid, log = spawn_copse(zeroconf: true)
+    refute_nil read_pid_file(ready), "the web process never started: #{File.read(log)}"
+
+    host = "cora.#{Copse::Zeroconf.domain}"
+    addresses = system_addresses(host)
+
+    Process.kill("TERM", pid)
+    wait_for_exit(pid)
+
+    refute_empty addresses, "#{host} did not resolve while the session was advertising it"
+    refute_includes addresses, "127.0.0.1",
+                    "a loopback answer would not be reachable from any other device"
+  end
+
+  # Asks the network directly, with the gem's own client, and stops at the first
+  # answer for this name. Independent of what the host does with `.local`.
+  def mdns_addresses(host, timeout: 8)
+    found = []
+    ZeroConf.resolve(host, timeout: timeout) do |message|
+      records = (message.answer + message.additional).filter_map do |name, _ttl, data|
+        data.address.to_s if data.is_a?(Resolv::DNS::Resource::IN::A) &&
+                             name.to_s.chomp(".").casecmp?(host)
+      end
+      next unless records.any?
+
+      found.concat(records)
+      :done
+    end
+    found.uniq
+  end
+
+  # mDNS answers arrive asynchronously, and the resolver may have to ask the
+  # network before it can answer us.
+  def system_addresses(host, timeout: 8)
+    deadline = Time.now + timeout
+    loop do
+      begin
+        return Addrinfo.getaddrinfo(host, nil, nil, :STREAM).map(&:ip_address).uniq
+      rescue SocketError
+        return [] if Time.now >= deadline
+      end
+      sleep 0.25
+    end
+  end
+
+  # Whether `.local` reaches an mDNS responder on this host at all.
+  def system_resolves_mdns?
+    Addrinfo.getaddrinfo("#{Socket.gethostname.split('.').first}.local", nil, nil, :STREAM).any?
+  rescue SocketError
+    false
   end
 
   def test_the_web_processes_exit_status_is_propagated

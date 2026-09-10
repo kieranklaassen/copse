@@ -22,6 +22,17 @@ class SessionInputsTest < Minitest::Test
     Copse::Session.new(@worktree, root: @root, out: StringIO.new)
   end
 
+  # Only its presence matters to the environment: an advertised name is one the
+  # server has to be reachable under, whatever is doing the advertising.
+  FakeAdvertiser = Class.new do
+    def start = true
+    def stop = nil
+  end
+
+  def advertised_session
+    Copse::Session.new(@worktree, root: @root, out: StringIO.new, advertiser: FakeAdvertiser.new)
+  end
+
   # --- Environment (R8, KTD11) ----------------------------------------------
 
   def test_exports_the_copse_variables
@@ -56,6 +67,47 @@ class SessionInputsTest < Minitest::Test
     assert_equal "ABSENT", out.strip
   ensure
     ENV.delete("COPSE_DATABASE_SUFFIX")
+  end
+
+  # --- Reachability, on the zeroconf path only ------------------------------
+
+  def test_no_reachability_variables_without_an_advertised_name
+    # A `.localhost` name resolves to loopback, which is what rails server binds
+    # anyway, and Rails' development allowlist already covers it. Setting either
+    # variable there would put the app on the network for no reason.
+    env = session.copse_env
+
+    refute_includes env, "BINDING"
+    refute_includes env, "RAILS_DEVELOPMENT_HOSTS"
+  end
+
+  def test_an_advertised_name_binds_every_interface_and_is_allowed_by_rails
+    @worktree.host = "cora.thicc.local"
+    env = advertised_session.copse_env
+
+    assert_equal "0.0.0.0", env["BINDING"]
+    # The leading dot is what covers `jane.cora.thicc.local` as well as the
+    # hostname itself -- the shape `subdomains` publishes.
+    assert_equal ".cora.thicc.local", env["RAILS_DEVELOPMENT_HOSTS"]
+  end
+
+  def test_an_inherited_binding_wins
+    # Copse supplies the default that makes an advertised name reachable; it does
+    # not take the decision away from an app that has already made it.
+    ENV["BINDING"] = "127.0.0.1"
+
+    assert_equal "127.0.0.1", advertised_session.copse_env["BINDING"]
+  ensure
+    ENV.delete("BINDING")
+  end
+
+  def test_an_inherited_development_host_allowlist_is_added_to_rather_than_replaced
+    ENV["RAILS_DEVELOPMENT_HOSTS"] = "app.example.test"
+
+    assert_equal "app.example.test,.cora.localhost",
+                 advertised_session.copse_env["RAILS_DEVELOPMENT_HOSTS"]
+  ensure
+    ENV.delete("RAILS_DEVELOPMENT_HOSTS")
   end
 
   def test_copse_port_duplicates_port_because_foreman_rewrites_port

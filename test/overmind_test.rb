@@ -38,9 +38,20 @@ class OvermindTest < Minitest::Test
     super
   end
 
-  def session(procfile)
+  def session(procfile, advertiser: nil)
     File.write(File.join(@root, "Procfile.dev"), procfile)
-    RecordingSession.new(@worktree, root: @root, out: @out)
+    RecordingSession.new(@worktree, root: @root, out: @out, advertiser: advertiser)
+  end
+
+  # Records which way it was asked to advertise. Threaded or forked is the whole
+  # distinction on this path.
+  RecordingAdvertiser = Class.new do
+    attr_reader :calls
+
+    def initialize = @calls = []
+    def start = @calls << :start
+    def stop = @calls << :stop
+    def fork_watching_parent = @calls << :fork_watching_parent
   end
 
   # --- The exec ------------------------------------------------------------
@@ -82,6 +93,30 @@ class OvermindTest < Minitest::Test
     session("web: bin/rails server\n").exec_overmind
 
     assert_includes @out.string, "=> Copse: http://cora.localhost:5368"
+  end
+
+  # --- Zeroconf naming ------------------------------------------------------
+
+  # Threads do not survive an exec, so the announcement has to be forked into a
+  # process of its own here. Started in-process -- as the foreman path does -- it
+  # would be replaced by Overmind milliseconds later and the name would never be
+  # answered for.
+  def test_the_advertiser_is_forked_rather_than_started_in_process
+    advertiser = RecordingAdvertiser.new
+
+    session("web: bin/rails server\n", advertiser: advertiser).exec_overmind
+
+    assert_equal [:fork_watching_parent], advertiser.calls
+  end
+
+  def test_overmind_is_handed_the_reachability_environment_too
+    @worktree.host = "cora.thicc.local"
+    s = session("web: bin/rails server\n", advertiser: RecordingAdvertiser.new)
+
+    s.exec_overmind
+
+    assert_equal "0.0.0.0", s.exec_env["BINDING"]
+    assert_equal ".cora.thicc.local", s.exec_env["RAILS_DEVELOPMENT_HOSTS"]
   end
 
   def test_writes_no_temporary_procfile
