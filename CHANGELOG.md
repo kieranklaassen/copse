@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-09-10)
 
 - Adds an optional second naming mode: `<branch>.<project>.<machine>.local`,
   published over multicast DNS, instead of `<branch>.<project>.localhost`
